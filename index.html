@@ -1134,6 +1134,19 @@ function mulberry32(a){ return function(){ a |= 0; a = a + 0x6D2B79F5 | 0;
 function idx(cx,cy){ return cy * MW + cx; }
 function isWall(cx,cy){ if(cx < 0 || cy < 0 || cx >= MW || cy >= MH) return true; return grid[idx(cx,cy)] === 1; }
 function wallAt(x,y){ return isWall((x / T) | 0, (y / T) | 0); }
+/* 第76单（秋「贴柜子会穿进去」）：按身体 AABB 判占格 —— 旧移动判定只查中心点所在格，
+   人物中心能一路顶进墙/家具格里，视觉上半个人扎进柜子。
+   这里对 [x-r, x+r]×[y-r, y+r] 覆盖到的所有格子逐一判 grid===1（墙/关着的门/家具/货箱
+   都走同一张 grid），任一命中即挡。配合「先 X 后 Y」的轴分离移动，家具角也斜穿不过去。
+   人物中心与碰撞体中心同为 (x,y)，碰撞半宽 r=BODY_R(6px)，视觉球（屏幕恒 8px 半径，
+   常规 zoom 下 ≤6px 世界半径）不会大于碰撞体。 */
+function unitBlockedAt(x, y, r){
+  var x0 = ((x - r) / T) | 0, x1 = ((x + r) / T) | 0;
+  var y0 = ((y - r) / T) | 0, y1 = ((y + r) / T) | 0;
+  for(var cx = x0; cx <= x1; cx++) for(var cy = y0; cy <= y1; cy++)
+    if(isWall(cx, cy)) return true;
+  return false;
+}
 function setW(cx,cy,v){ if(cx > 0 && cy > 0 && cx < MW - 1 && cy < MH - 1){ grid[idx(cx,cy)] = v; visDirty(); } }
 /* 第28单：格子实体状态一变，视野多边形立刻作废（开门/关门/玻璃碎当帧生效，不留残帧） */
 function visDirty(){ _gridRev = (_gridRev | 0) + 1; if(_visCache){ _visCache.f = -1; _visCache.poly = null; } }
@@ -1313,6 +1326,101 @@ function buildIndoor(seed){
   return { spawn:{x:16*T+T/2,y:12*T+T/2}, rooms:depot.rooms.concat(office.rooms,utility.rooms) };
 }
 
+/* ============================================================
+   第74D单 · 三张搜刮图（30×22，写法照抄 buildWarehouse/buildFactory）：
+   只用 boxW/fillW/setW 落墙 + markThin/markGlass 登记材质 + doorSpots 登记铁门，
+   返回 { spawn, rooms } 交回 buildMap 统一走 genFloorMat/genLandmarks/genProps，
+   不引入任何新机制。容器密度倍率见 MAPS[].lootMul 与 lootGenerate。
+   ============================================================ */
+
+/* 旧码头：两排长仓房 + 中间集装箱阵 + 东侧水边空地（空格 ≈430 ≥ 220） */
+function buildDock(){
+  var x, y;
+  // 北排长仓房
+  boxW(3, 3, 16, 8);
+  setW(8, 8, 0); setW(9, 8, 0);            // 南墙 1 号门
+  setW(13, 8, 0); setW(14, 8, 0);          // 南墙 2 号门
+  setW(6, 3, 0);                           // 北墙检修门
+  fillW(5, 5, 1, 2); fillW(10, 5, 1, 2); fillW(14, 5, 1, 2);   // 货架
+  // 南排长仓房
+  boxW(3, 13, 16, 19);
+  setW(8, 13, 0); setW(9, 13, 0);          // 北墙 1 号门
+  setW(13, 13, 0); setW(14, 13, 0);        // 北墙 2 号门
+  setW(6, 19, 0);                          // 南墙检修门
+  fillW(5, 15, 1, 2); fillW(10, 15, 1, 2); fillW(14, 16, 1, 2);
+  // 中间集装箱阵（错开摆，走廊绕行）
+  fillW(5, 10, 2, 2); fillW(10, 9, 3, 2); fillW(15, 10, 2, 2); fillW(8, 12, 2, 1);
+  // 东侧水边空地：散装集装箱当掩体
+  fillW(22, 4, 2, 3); fillW(26, 5, 2, 2); fillW(21, 10, 2, 2);
+  fillW(25, 12, 3, 2); fillW(23, 16, 2, 3); fillW(26, 18, 2, 1);
+  markThin(5,5,1,2); markThin(10,5,1,2); markThin(14,5,1,2);
+  markThin(5,15,1,2); markThin(10,15,1,2); markThin(14,16,1,2);
+  [[5,10,2,2],[10,9,3,2],[15,10,2,2],[8,12,2,1],
+   [22,4,2,3],[26,5,2,2],[21,10,2,2],[25,12,3,2],[23,16,2,3],[26,18,2,1]
+  ].forEach(function(r){ markThin(r[0], r[1], r[2], r[3]); });
+  markGlass(6, 3); markGlass(11, 3);       // 北仓房北墙窗
+  markGlass(6, 19); markGlass(11, 19);     // 南仓房南墙窗
+  doorSpots.push({ cells: [[8,8],[9,8]] }, { cells: [[13,13],[14,13]] });
+  return { spawn: { x: 25 * T + T / 2, y: 15 * T + T / 2 },
+    rooms: [{ x0: 4, y0: 4, x1: 15, y1: 7 }, { x0: 4, y0: 14, x1: 15, y1: 18 },
+      { x0: 20, y0: 9, x1: 27, y1: 14 }] };
+}
+
+/* 废弃医院：主走廊 y10..12 + 南北病房格子（各 4 间）+ 东侧大厅（空格 ≈385 ≥ 220） */
+function buildClinic(){
+  var x, y, i, vx;
+  // 北翼病房楼（4 间，竖隔墙 x=7/12/17，门全开在南墙朝主走廊）
+  boxW(2, 2, 24, 9);
+  for(i = 0; i < 3; i++){ vx = 7 + i * 5; for(y = 3; y <= 8; y++) setW(vx, y, 1); }
+  setW(5, 9, 0); setW(10, 9, 0); setW(15, 9, 0); setW(20, 9, 0);
+  fillW(3, 6, 1, 2); fillW(8, 7, 2, 1); fillW(13, 6, 1, 2); fillW(18, 7, 2, 1);   // 病床
+  // 南翼病房楼（4 间，门全开在北墙朝主走廊）
+  boxW(2, 13, 24, 19);
+  for(i = 0; i < 3; i++){ vx = 7 + i * 5; for(y = 14; y <= 18; y++) setW(vx, y, 1); }
+  setW(5, 13, 0); setW(10, 13, 0); setW(15, 13, 0); setW(20, 13, 0);
+  fillW(3, 16, 1, 2); fillW(8, 14, 2, 1); fillW(13, 16, 1, 2); fillW(18, 14, 2, 1);
+  // 东侧大厅：柱阵 + 两翼东墙各开一个门，绕行多两条路
+  fillW(26, 4, 2, 2); fillW(26, 10, 2, 2); fillW(26, 16, 2, 2);
+  setW(24, 7, 0); setW(24, 8, 0);
+  setW(24, 16, 0); setW(24, 17, 0);
+  markThin(3,6,1,2); markThin(8,7,2,1); markThin(13,6,1,2); markThin(18,7,2,1);
+  markThin(3,16,1,2); markThin(8,14,2,1); markThin(13,16,1,2); markThin(18,14,2,1);
+  markThin(26,4,2,2); markThin(26,10,2,2); markThin(26,16,2,2);
+  markGlass(4, 2); markGlass(9, 2); markGlass(14, 2);      // 北翼北墙窗
+  markGlass(4, 19); markGlass(9, 19); markGlass(14, 19);   // 南翼南墙窗
+  doorSpots.push({ cells: [[5,9]] }, { cells: [[15,13]] }, { cells: [[24,16],[24,17]] });
+  return { spawn: { x: 26 * T + T / 2, y: 12 * T + T / 2 },
+    rooms: [{ x0: 3, y0: 3, x1: 6, y1: 8 }, { x0: 8, y0: 3, x1: 11, y1: 8 },
+      { x0: 13, y0: 3, x1: 16, y1: 8 }, { x0: 18, y0: 3, x1: 23, y1: 8 },
+      { x0: 3, y0: 14, x1: 6, y1: 18 }, { x0: 8, y0: 14, x1: 11, y1: 18 },
+      { x0: 13, y0: 14, x1: 16, y1: 18 }, { x0: 18, y0: 14, x1: 23, y1: 18 },
+      { x0: 25, y0: 3, x1: 27, y1: 18 }] };
+}
+
+/* 集装箱场：开阔堆场 + 集装箱横竖交错当掩体 + 四角小房（空格 ≈410 ≥ 220） */
+function buildYard(){
+  var x, y;
+  // 四角小房（各 1 门 + 货架 + 窗）
+  boxW(2, 2, 7, 6);   setW(4, 6, 0); setW(5, 6, 0);    fillW(3, 3, 1, 2);
+  boxW(22, 2, 27, 6); setW(24, 6, 0); setW(25, 6, 0);  fillW(26, 3, 1, 2);
+  boxW(2, 15, 7, 19); setW(4, 15, 0); setW(5, 15, 0);  fillW(3, 17, 1, 2);
+  boxW(22, 15, 27, 19); setW(24, 15, 0); setW(25, 15, 0); fillW(26, 17, 1, 2);
+  // 中央堆场：三横一竖交错，通道绕行
+  fillW(9, 4, 3, 2); fillW(13, 5, 3, 2); fillW(17, 4, 3, 2);
+  fillW(10, 9, 3, 2); fillW(15, 9, 3, 2); fillW(19, 8, 2, 2);
+  fillW(9, 14, 3, 2); fillW(13, 13, 3, 2); fillW(17, 14, 3, 2);
+  fillW(14, 11, 2, 2); fillW(19, 12, 2, 2);
+  markThin(3,3,1,2); markThin(26,3,1,2); markThin(3,17,1,2); markThin(26,17,1,2);
+  [[9,4,3,2],[13,5,3,2],[17,4,3,2],[10,9,3,2],[15,9,3,2],[19,8,2,2],
+   [9,14,3,2],[13,13,3,2],[17,14,3,2],[14,11,2,2],[19,12,2,2]
+  ].forEach(function(r){ markThin(r[0], r[1], r[2], r[3]); });
+  markGlass(3, 2); markGlass(26, 2); markGlass(3, 19); markGlass(26, 19);
+  doorSpots.push({ cells: [[4,6],[5,6]] }, { cells: [[24,15],[25,15]] });
+  return { spawn: { x: 11 * T + T / 2, y: 11 * T + T / 2 },
+    rooms: [{ x0: 3, y0: 3, x1: 6, y1: 5 }, { x0: 23, y0: 3, x1: 26, y1: 5 },
+      { x0: 3, y0: 16, x1: 6, y1: 18 }, { x0: 23, y0: 16, x1: 26, y1: 18 }] };
+}
+
 // 随机图：房间 + L 形走廊连通
 function buildRandom(seed){
   var rnd = mulberry32(seed), i, rooms = [], x, y;
@@ -1451,6 +1559,9 @@ var MAPS = [
   { id: 'garage',    name: '地下车库', sub: 'PARKING B2', n: 10, build: buildGarage },
   { id: 'random',    name: '随机区域', sub: 'UNKNOWN',   n: 11, build: buildRandom },
   { id: 'indoor',    name: '室内战区', sub: 'INDOOR CQB', n: 11, build: buildIndoor },
+  { id: 'dock',   name: '旧码头',   sub: 'OLD DOCKS',      n: 8, lootMul: 2.2, build: buildDock },
+  { id: 'clinic', name: '废弃医院', sub: 'OLD CLINIC',     n: 8, lootMul: 2.4, build: buildClinic },
+  { id: 'yard',   name: '集装箱场', sub: 'CONTAINER YARD', n: 7, lootMul: 2.6, build: buildYard },
   { id: 'mine',      name: '我的地图', sub: 'CUSTOM',    n: 10, build: null }
 ];
 
@@ -2367,8 +2478,10 @@ function updateCat(c, dt){
   if(c.st === 'wander' && c.tm <= 0){ c.ang += (Math.random() - 0.5) * 2.4; c.tm = 1.2 + Math.random() * 2.2; }
   var spd = c.st === 'flee' ? 150 : 34;
   var nx = c.x + Math.cos(c.ang) * spd * dt, ny = c.y + Math.sin(c.ang) * spd * dt;
-  if(wallAt(nx, ny)) c.ang += 1.8 + Math.random() * 1.5;
-  else { c.x = nx; c.y = ny; }
+  /* 第76单：猫同样按身体 AABB 轴分离判占格（半宽 6px），不再只查中心点 → 不再扎进家具/墙 */
+  var bx = unitBlockedAt(nx, c.y, 6), by = unitBlockedAt(c.x, ny, 6);
+  if(bx && by) c.ang += 1.8 + Math.random() * 1.5;
+  else { if(!bx) c.x = nx; if(!by) c.y = ny; }
   c.x = clamp(c.x, T + 4, WW - T - 4);
   c.y = clamp(c.y, T + 4, WH - T - 4);
 }
@@ -2632,10 +2745,12 @@ var MODS = [
   { id: 'none',   n: '无',       cat: 'stock',  p: 0,   d: {} },
   { id: 'lstock', n: '轻型枪托', cat: 'stock',  p: 250, d: { wt: -0.6, bloom: 0.08 } },
   { id: 'sstock', n: '稳定枪托', cat: 'stock',  p: 400, d: { wt: 0.6, bloom: -0.25 } },
+  { id: 'astock', n: '可调枪托', cat: 'stock',  p: 320, d: { wt: 0.3, bloom: -0.12, ads: -0.05 } },
   /* 第39单：6 档瞄具由只读表 OPTICS 生成（价格/系数唯一来源，见下方 OPTICS） */
-  { id: 'bshort', n: '短枪管',   cat: 'barrel', p: 300, d: { wt: -0.5, eff: -0.20 } },
+  /* 第79单 枪管三项按派单数值：短管 伤害−8% 后坐+12% 移速+3% / 长管 伤害+10% 后坐−8% 移速−4%（move 为乘法移速系数） */
+  { id: 'bshort', n: '短枪管',   cat: 'barrel', p: 300, d: { dmg: -0.08, bloom: 0.12, move: 0.03 } },
   { id: 'bstd',   n: '标准枪管', cat: 'barrel', p: 0,   d: {} },
-  { id: 'blong',  n: '长枪管',   cat: 'barrel', p: 500, d: { wt: 0.5, eff: 0.20 } }
+  { id: 'blong',  n: '长枪管',   cat: 'barrel', p: 500, d: { dmg: 0.10, bloom: -0.08, move: -0.04 } }
 ];
 /* 第39单 瞄具统一只读表 OPTICS（唯一来源；改枪台/开镜/FOV/晃动/小地图/探针全读它）
    adsMove 为「开镜移速下降比例」；spread 为 ADS 散布系数（乘在基础 spread 上，机瞄 0.30 为基准）；
@@ -2649,6 +2764,21 @@ var OPTICS = {
   scope8: { n:'8 倍',      tag:'8x', p:4200, zoom:8, adsTime:0.34, adsMove:0.55, wt:1.9, stealth:-15, spread:0.22, scene:'远程', fov:0.55, nearPen:1.8, miniHide:true,  hint:'近战建议换 1–2 倍' }
 };
 Object.keys(OPTICS).forEach(function(k){ var o = OPTICS[k]; MODS.push({ id:k, n:o.n, cat:'optic', p:o.p, d:{} }); });
+/* 第79单 七把点名枪的参数化轮廓（唯一来源：改枪台剖面图 drawBenchGun + 局内俯视 gunSpec/drawGun 都读它）。
+   bl 机匣长 · bw 机匣宽 · tl 枪管长 · tw 枪管粗 · stock 枪托长
+   stockSt 托型：tube 伸缩管托 / wood 木托 / fold 方折叠托 / skel 镂空托 / bull 无托
+   magLen 弹匣长 · curveMag 1=弯匣 · magAng 斜插角 · magX 弹匣横向位置（机匣比例，无托枪靠后）
+   foreL 护木比例（盖住枪管根部多长） · foreX 前握把横向位置 · carry 提把 · rail 平顶皮轨
+   wood 木护木 · tan 沙色机身 · trans 半透明弹匣。七把枪屏长仍由 gunDisplayScale 统一压到 ≤22px。 */
+var GUN_ART = {
+  m4:    { bl: 19, bw: 6.6, tl: 12, tw: 2.1, stock: 4, stockSt: 'tube', magLen: 10, curveMag: 0, magAng: 0.02, magX: 0.42, foreL: 0.62, foreX: 0.74, carry: 1, rail: 0 },
+  hk416: { bl: 20, bw: 7.0, tl: 12, tw: 2.2, stock: 4, stockSt: 'tube', magLen: 10, curveMag: 0, magAng: 0.04, magX: 0.44, foreL: 0.70, foreX: 0.78, carry: 0, rail: 1 },
+  ak:    { bl: 18, bw: 7.4, tl: 13, tw: 2.7, stock: 5, stockSt: 'wood', magLen: 11, curveMag: 1, magAng: 0.10, magX: 0.40, foreL: 0.52, foreX: 0.62, carry: 0, rail: 0, wood: 1 },
+  scar:  { bl: 21, bw: 7.8, tl: 13, tw: 2.6, stock: 5, stockSt: 'fold', magLen: 9,  curveMag: 0, magAng: 0.05, magX: 0.46, foreL: 0.68, foreX: 0.80, carry: 0, rail: 1, tan: 1 },
+  aug:   { bl: 17, bw: 8.0, tl: 14, tw: 2.0, stock: 0, stockSt: 'bull', magLen: 9,  curveMag: 1, magAng: 0.06, magX: 0.16, foreL: 0.34, foreX: 0.55, carry: 1, bullpup: 1 },
+  g36:   { bl: 18, bw: 7.2, tl: 10, tw: 2.2, stock: 4, stockSt: 'skel', magLen: 10, curveMag: 1, magAng: 0.07, magX: 0.42, foreL: 0.56, foreX: 0.74, carry: 1, trans: 1 },
+  qbz95: { bl: 16, bw: 8.2, tl: 13, tw: 2.0, stock: 0, stockSt: 'bull', magLen: 8,  curveMag: 1, magAng: 0.08, magX: 0.14, foreL: 0.28, foreX: 0.52, carry: 0, bullpup: 1 }
+};
 function opticsOf(id){ return OPTICS[(loadout[widOf(id||'m4')]||{}).optic] || OPTICS.none; }
 /* 第39单 近距惩罚：6/8x 且 8 米内有活敌 → sway ×1.8、ADS 移速再 −10%、小地图无敌人报点 */
 function benchNear(){
@@ -2681,7 +2811,7 @@ function modDeltaText(d){             /* 属性增量 → 说明书文字（伤�
   var ks = Object.keys(d);
   if(!ks.length) return '——';
   var L = { dmg: '伤害', rpm: '射速', spread: '精度', mag: '弹匣', eff: '有效射程',
-    noise: '枪声', ads: '开镜', reload: '换弹', bloom: '后坐', wt: '重量' };
+    noise: '枪声', ads: '开镜', reload: '换弹', bloom: '后坐', wt: '重量', move: '移速' };
   return ks.map(function(k){
     var v = d[k];
     return L[k] + ' ' + (k === 'wt' ? (v > 0 ? '+' : '') + v + 'kg' : (v > 0 ? '+' : '') + Math.round(v * 100) + '%');
@@ -2690,6 +2820,17 @@ function modDeltaText(d){             /* 属性增量 → 说明书文字（伤�
 
 var loadout = {};
 WEAPON_IDS.forEach(function(id){ loadout[id] = normMods({}); });
+/* 第79单 装配状态落盘：改枪台/仓库拖装都改 loadout，不落盘刷新就掉（键跟账号走） */
+function loadoutSave(){
+  try{ localStorage.setItem(tqKey('tq_loadouts'), JSON.stringify(loadout)); }catch(e){}
+}
+function loadoutLoad(){
+  try{
+    var o = JSON.parse(localStorage.getItem(tqKey('tq_loadouts')) || 'null');
+    if(o && typeof o === 'object') for(var k in o) if(WEAPONS[k]) loadout[k] = normMods(o[k]);
+  }catch(e){}
+}
+loadoutLoad();
 var SLOTS = { primary: 'm4', secondary: 'm92', melee: 'knife' };
 
 function attDef(slot, id){
@@ -2714,6 +2855,7 @@ function getStats(id){
     for(var k in def.d){
       if(k === 'mag') o.mag = Math.round(o.mag * (1 + def.d[k]));
       else if(k === 'wt') o.wt = Math.max(0.4, o.wt + def.d[k]);   /* §33.3 重量加算：枪管/枪托动机动 */
+      else if(k === 'move') o.move = (o.move == null ? 1 : o.move) * (1 + def.d[k]);   /* 第79单：枪管移速系数（短管 +3% / 长管 −4%） */
       else if(k === 'dmg') o.dmg = o.dmg * (1 + def.d[k]);
       else if(k === 'eff') o.eff = o.eff * (1 + def.d[k]);
       else o[k] = o[k] * (1 + def.d[k]);
@@ -2916,9 +3058,21 @@ var DIFFS = {
   rookie:   { name: '新兵', react: 1.20, aim: 0.30,  hear: 0.5, sight: 0.70, tactics: 0.25, hp: 130, dmg: 0.75, cd: 2.6, cour: -0.10 },
   veteran:  { name: '老兵', react: 0.70, aim: 0.18,  hear: 0.8, sight: 0.90, tactics: 0.50, hp: 100, dmg: 1.00, cd: 2.0, cour: 0 },
   elite:    { name: '精英', react: 0.35, aim: 0.09,  hear: 1.0, sight: 1.00, tactics: 0.80, hp: 100, dmg: 1.10, cd: 1.4, cour: 0.08 },
-  hardcore: { name: '硬核', react: 0.15, aim: 0.045, hear: 1.3, sight: 1.15, tactics: 1.00, hp: 85,  dmg: 1.20, cd: 1.0, cour: 0.12 }
+  hardcore: { name: '硬核', react: 0.15, aim: 0.045, hear: 1.3, sight: 1.15, tactics: 1.00, hp: 85,  dmg: 1.20, cd: 1.0, cour: 0.12 },
+  nightmare: { name: '噩梦', react: 0.05, aim: 0.02, hear: 1.6, sight: 1.30, tactics: 1.20, hp: 100, dmg: 1.35, cd: 0.70, cour: 0.20 }
 };
 function DF(){ return DIFFS[S.diff] || DIFFS.veteran; }
+
+/* 第74E单：只读难度探针 __TQ.diff() → { key, name, react, aim }。
+   __TQ 本体在 part-08 §22 才整体赋值，故 setTimeout(0) 在主脚本执行完后补挂。 */
+function tqDiffProbe(){
+  var d = DF();
+  return { key: S.diff, name: d.name, react: d.react, aim: d.aim };
+}
+(function tqDiffProbeInstall(){
+  if(window.__TQ){ if(!window.__TQ.diff) window.__TQ.diff = tqDiffProbe; return; }
+  setTimeout(tqDiffProbeInstall, 0);
+})();
 
 /* 第 17 节：四个派系，武器池 / 行为 / 士气都不一样 */
 var FACTIONS = {
@@ -3371,9 +3525,9 @@ function onAcquire(u, foe){
   u.sawT = 0;
   u.aimErr = 0.2;
   u.reactT = u.team === 'enemy'
-    ? aiReactOf(u) * (0.9 + Math.random() * 0.2)                   // §44 三档反应 0.55/0.30/0.10
-    : DF().react * (0.85 + Math.random() * 0.3);
-  u.aimErr = DF().aim * (0.8 + Math.random() * 0.5);
+    ? Math.min(aiReactOf(u), DF().react) * (0.9 + Math.random() * 0.2)   // §44 三档反应 0.55/0.30/0.10 · 第74E单：噩梦档敌人取更狠的那个
+    : DF().react * (0.85 + Math.random() * 0.3) * (u.team === 'ally' ? ALLY_SKILL.reactMul : 1);   // 第74E单：队友反应 ×0.5
+  u.aimErr = DF().aim * (0.8 + Math.random() * 0.5) * (u.team === 'enemy' && DF().aim < 0.06 ? 0.6 : 1);   // 第74E单：仅极准档（噩梦/硬核）敌人收紧
   if(u.team === 'enemy'){
     // §44 头一回看见玩家 → 「看见了！」，之后每次重新接敌 → 报方向
     sayWord(u, u.saySaw ? 'dir' : 'spot', u.saySaw ? sayDirText(u, foe) : null);
@@ -3929,7 +4083,7 @@ function fireOnce(u, stats, angle){
   for(var i = 0; i < n; i++){
     var a;
     if(isAI){
-      a = aiAng + (Math.random() - 0.5) * stats.spread * (n > 1 ? 2.2 : 0.6) * tremor * (u.burst ? 1 : aiFirstMul(u));   // §44 首发散布 ×1.6/1.0/0.45
+      a = aiAng + (Math.random() - 0.5) * stats.spread * (n > 1 ? 2.2 : 0.6) * tremor * (u.burst ? 1 : aiFirstMul(u)) * (u.team === 'ally' ? ALLY_SKILL.spreadMul : 1);   // §44 首发散布 ×1.6/1.0/0.45 · 第74E单队友 ×0.5
     } else if(u === P){
       /* 第55单：玩家的子弹只走散布唯一出口（含弹种修正）；弹孔圈画的就是这个值 */
       var sp = tqSpreadRad(u);
@@ -4049,9 +4203,15 @@ function armorBreak(u){
 var DUR_CFG = { gun:100, supp:40, torch:100, kitHeal:40, kitPrice:600, kitCast:2.0,
   armorWeak:0.30, gunJam:0.30, gunJamP:0.03, suppWeak:0.20,
   torchDrain:0.55, gunShot:0.05, suppShot:0.30, repairFee:0.6, weakRed:0.6 };
-function durMaxOf(id){
+function durMaxOf(id, it){
   var ak = armorKeyOfId(id);
-  if(ak && ARMOR[ak]) return ARMOR[ak].dur;
+  if(ak && ARMOR[ak]){
+    var d0 = ARMOR[ak].dur;
+    /* 第77单：护甲品质 → 耐久上限加成（神话 +25%，其余按 mul 小步）；it 缺省按 0 档原值 */
+    if(it && typeof it.q === 'number' && it.q >= 1 && typeof qArmorDurMul === 'function')
+      d0 = Math.round(d0 * qArmorDurMul(it.q));
+    return d0;
+  }
   if(id === 'm:supp' || id === 'supp') return DUR_CFG.supp;
   if(TRADE_GOODS[id] && TRADE_GOODS[id].gun) return DUR_CFG.gun;
   return 0;
@@ -4065,7 +4225,7 @@ function armorMul(ammoLv, armorLv, dur, durMax){
 /* 局外维修费 = (1 - dur/durMax) × 价 × 0.6，向下取整；满耐久返回 0 */
 function repairCost(item){
   if(!item) return 0;
-  var mx = durMaxOf(item.id);
+  var mx = durMaxOf(item.id, item);        /* 第77单：维修上限带品质 */
   if(!mx) return 0;
   var r = item.dur == null ? 1 : item.dur;
   if(r >= 1) return 0;
@@ -4396,6 +4556,7 @@ function updatePlayer(dt){
   // 重量影响移速（第 18 节）：手枪 1.0kg 几乎无感，火箭筒 7.5kg 掉两成
   var wgt = (WEAPONS[widOf(P.wid)] || {}).wt || 3;
   speed *= clamp(1 - (wgt - 1.5) * 0.032, 0.78, 1.02);
+  if(st.move != null) speed *= st.move;             /* 第79单：枪管移速系数（短管 +3% · 长管 −4%） */
   speed *= (P.armorSpd || 1);                       // §25.8 护甲越重越慢
   if(P.slowT > 0) speed *= 0.6;                     // 第42单：震撼弹减速 40%（1.5s，随 slowT 衰减）
   speed *= packSpeedMul();                          // 第35单：背包超 25kg 掉速（最低 0.6，单独一段）
@@ -4421,11 +4582,12 @@ function updatePlayer(dt){
   if(Math.hypot(P.vx, P.vy) < 1.5){ P.vx = 0; P.vy = 0; }
   if(Math.abs(P.vx) > 0.01 || Math.abs(P.vy) > 0.01){
     var nx = P.x + P.vx * dt, ny = P.y + P.vy * dt;
-    // §31.4 撞上货箱就顺势推过去，推不动才算撞墙
-    if(!wallAt(nx, P.y)) P.x = nx;
-    else { pushCrateAt(nx, P.y, Math.sign(P.vx), 0); if(!wallAt(nx, P.y)) P.x = nx; else P.vx = 0; }
-    if(!wallAt(P.x, ny)) P.y = ny;
-    else { pushCrateAt(P.x, ny, 0, Math.sign(P.vy)); if(!wallAt(P.x, ny)) P.y = ny; else P.vy = 0; }
+    /* 第76单：轴分离移动（先 X 后 Y）+ 身体 AABB 判占格（unitBlockedAt，part-01）——
+       被挡就停该轴，家具/墙角斜穿不进去；撞货箱仍先试着推走再判。 */
+    if(!unitBlockedAt(nx, P.y, P.r)) P.x = nx;
+    else { pushCrateAt(nx, P.y, Math.sign(P.vx), 0); if(!unitBlockedAt(nx, P.y, P.r)) P.x = nx; else P.vx = 0; }
+    if(!unitBlockedAt(P.x, ny, P.r)) P.y = ny;
+    else { pushCrateAt(P.x, ny, 0, Math.sign(P.vy)); if(!unitBlockedAt(P.x, ny, P.r)) P.y = ny; else P.vy = 0; }
     P.walkPhase += dt * (P.sprint ? 15 : prone ? 4 : crouch ? 6 : 9);
     P.stepAcc = (P.stepAcc || 0) + dt * (P.sprint ? 1.7 : prone ? 0.5 : 1);
     if(P.stepAcc > 0.42){
@@ -5292,6 +5454,8 @@ function updateEnemy(e, dt){
 }
 
 /* ==================== 10. 队友 AI ==================== */
+/* 第74E单：队友强度唯参数表（人机特别强）——调参只动这张表 */
+var ALLY_SKILL = { turn: 13.0, reactMul: 0.5, fireCdMul: 0.6, spreadMul: 0.5, engageMul: 1.15, follow: 92, aimTol: 0.14 };
 function updateAlly(a, dt){
   if(!a.alive || a.isRemote) return;
   var w = enemyStats(a);
@@ -5306,11 +5470,11 @@ function updateAlly(a, dt){
   if(foe){
     var d = Math.hypot(foe.x - a.x, foe.y - a.y);
     var want = Math.atan2(foe.y - a.y, foe.x - a.x);
-    a.aim = turnToward(a.aim, want, dt * 8);
-    if(a.fireT <= 0 && a.reactT <= 0 && a.mag > 0 && d < w.range * 0.92 && Math.abs(angDiff(a.aim, want)) < 0.2){
+    a.aim = turnToward(a.aim, want, dt * ALLY_SKILL.turn);   // 第74E单：转向 ×13.0
+    if(a.fireT <= 0 && a.reactT <= 0 && a.mag > 0 && d < w.range * ALLY_SKILL.engageMul && Math.abs(angDiff(a.aim, want)) < ALLY_SKILL.aimTol){
       a.mag--;
       fireOnce(a, w, a.aim);
-      a.fireT = 60 / w.rpm * (1.4 + Math.random() * 0.8);
+      a.fireT = 60 / w.rpm * (0.9 + Math.random() * 0.5) * ALLY_SKILL.fireCdMul;   // 第74E单：射速 ×0.6
     } else if(a.mag <= 0 && a.reloadT <= 0){ a.reloadT = w.reload; sayWord(a, 'reload'); }   // §44 掩护我换弹！
     if(a.thinkT <= 0 && d > 240){
       a.thinkT = 1.2;
@@ -5323,7 +5487,12 @@ function updateAlly(a, dt){
   if(!P || !P.alive) return;
   var slot = a.slot === 0 ? -1 : 1;
   var ang = P.aim + slot * 0.62;
-  var tx = P.x + Math.cos(ang) * 78, ty = P.y + Math.sin(ang) * 78;
+  var tx = P.x + Math.cos(ang) * ALLY_SKILL.follow, ty = P.y + Math.sin(ang) * ALLY_SKILL.follow;   // 第74E单：跟随距离 78 → 92
+  /* 第74E单：不挡枪线——目标点贴身且几乎在准星正前方时，往侧后挪一格重算一次（只一次，不再循环） */
+  if(Math.hypot(tx - P.x, ty - P.y) < 120 && Math.abs(angDiff(Math.atan2(ty - P.y, tx - P.x), P.aim)) < 0.25){
+    ang = P.aim + slot * 0.95;
+    tx = P.x + Math.cos(ang) * ALLY_SKILL.follow; ty = P.y + Math.sin(ang) * ALLY_SKILL.follow;
+  }
   if(wallAt(tx, ty)){ tx = P.x; ty = P.y; }
   a.pathCd = (a.pathCd || 0) - dt;
   var far = Math.hypot(a.x - P.x, a.y - P.y);
@@ -5335,6 +5504,27 @@ function updateAlly(a, dt){
   stepPath(a, dt, 1.15);
   a.aim = turnToward(a.aim, P.aim + slot * 0.35, dt * 3.4);
 }
+
+/* 第74E单：只读队友探针 __TQ.ally() → [{name, dist, engaged, reactT, spreadMul}]（没队友返回 []）。
+   dist=离玩家距离(px)；engaged=state==='combat'；__TQ 本体在 part-08 §22 才整体赋值，
+   故 setTimeout(0) 在主脚本执行完后补挂。 */
+function tqAllyProbe(){
+  var out = [], i;
+  for(i = 0; i < allies.length; i++){
+    var a = allies[i];
+    if(!a || !a.alive) continue;
+    out.push({ name: a.name,
+               dist: P ? +Math.hypot(a.x - P.x, a.y - P.y).toFixed(1) : null,
+               engaged: a.state === 'combat',
+               reactT: +((a.reactT || 0)).toFixed(2),
+               spreadMul: ALLY_SKILL.spreadMul });
+  }
+  return out;
+}
+(function tqAllyProbeInstall(){
+  if(window.__TQ){ if(!window.__TQ.ally) window.__TQ.ally = tqAllyProbe; return; }
+  setTimeout(tqAllyProbeInstall, 0);
+})();
 
 /* ==================== 11. 子弹 ==================== */
 function segDist(px, py, qx, qy, cx, cy){
@@ -7346,7 +7536,10 @@ function gunSpec(u){
     case 'pistol':   m = { bl: 11, bw: 6.2, tl: 6,  tw: 2.4, stock: 0, mag: 0, fore: 0, optic: 0, bipod: 0 }; break;
     case 'revolver': m = { bl: 10, bw: 7.0, tl: 8,  tw: 2.8, stock: 0, mag: 0, fore: 0, optic: 0, bipod: 0, cyl: 1 }; break;
     case 'smg':      m = { bl: 14, bw: 7.0, tl: 7,  tw: 2.6, stock: 3, mag: 1, magLen: 8, curveMag: 1, fore: 0, optic: 0, bipod: 0 }; break;
-    case 'ar':       m = { bl: 20, bw: 7.0, tl: 15, tw: 2.4, stock: 5, mag: 1, magLen: 10, fore: 1, optic: 0, bipod: 0 }; break;
+    case 'ar':       m = { bl: 20, bw: 7.0, tl: 15, tw: 2.4, stock: 5, mag: 1, magLen: 10, fore: 1, foreL: 0.6, foreX: 0.74, magX: 0.42, optic: 0, bipod: 0 };
+      /* 第79单：点名枪读参数化轮廓表（M4A1/AKM/SCAR-H/HK416/AUG A3/G36C/95式 各自一套） */
+      if(GUN_ART[wid]){ var ga = GUN_ART[wid], gk; for(gk in ga) m[gk] = ga[gk]; m.art = 1; }
+      break;
     case 'dmr':      m = { bl: 23, bw: 6.8, tl: 22, tw: 2.2, stock: 6, mag: 1, fore: 0, optic: 1, bipod: 0 }; break;
     case 'sniper':   m = { bl: 24, bw: 6.4, tl: 32, tw: 2.2, stock: 7, mag: 1, fore: 0, optic: 2, bipod: 1 }; break;
     case 'shotgun':  m = { bl: 18, bw: 8.6, tl: 19, tw: 4.0, stock: 5, mag: 0, fore: 1, optic: 0, bipod: 0 }; break;
@@ -7358,12 +7551,15 @@ function gunSpec(u){
     case 'xbow':     m = { bl: 5, bw: 20, tl: 14, tw: 1.6, stock: 6, mag: 0, fore: 0, optic: 0, bipod: 0, xbow: 1 }; break;
     default:         m = { bl: 20, bw: 7.0, tl: 15, tw: 2.4, stock: 5, mag: 1, fore: 1, optic: 0, bipod: 0 };
   }
-  /* 第52单：记下类别（drawGun 按它画不同轮廓）+ 按 id 哈希微调长度与弹匣角度（±8%） */
+  /* 第52单：记下类别（drawGun 按它画不同轮廓）+ 按 id 哈希微调长度与弹匣角度（±8%）
+     第79单：GUN_ART 点名枪尺寸是精确设计值，跳过哈希微调 */
   m.shape = shape;
   var _h = tqHash(wid), _jf = function(n){ return 1 + (((_h >>> (n * 5)) % 17) - 8) / 100; };
-  m.bl *= _jf(0); m.tl *= _jf(1);
-  if(m.magLen) m.magLen *= _jf(2);
-  m.magAng = (((_h >>> 9) % 9) - 4) * 0.035;
+  if(!m.art){
+    m.bl *= _jf(0); m.tl *= _jf(1);
+    if(m.magLen) m.magLen *= _jf(2);
+    m.magAng = (((_h >>> 9) % 9) - 4) * 0.035;
+  }
   if(u === P){
     var att = loadout[wid] || {};
     if(att.muzzle === 'supp'){ m.tl += 6; m.tw += 0.9; m.supp = 1; }
@@ -7406,10 +7602,29 @@ function drawGun(u, sx, sy, z){
   var steel = isEnemy ? '#2b2420' : '#2a333a';
   var dark = isEnemy ? '#33261f' : '#2c353d';
   var parts = [], i;
-  if(m.stock) parts.push({ x: -m.stock - 4, y: -2.4, w: m.stock + 4.6, h: 4.8, c: body });
+  /* 第79单：枪托按托型画（tube 细管 / wood 木托 / fold 方折叠 / skel 镂空 / bull 无托无块）—— 七把枪托一眼可分 */
+  var stc = body;
+  if(m.stockSt === 'wood') stc = '#5e4326';
+  else if(m.stockSt === 'fold') stc = '#3d4750';
+  else if(m.stockSt === 'skel') stc = '#37424b';
+  if(m.stock && m.stockSt === 'skel'){
+    parts.push({ x: -m.stock - 4, y: -3.0, w: m.stock + 4.6, h: 1.8, c: stc });
+    parts.push({ x: -m.stock - 4, y: 1.4, w: m.stock + 4.6, h: 1.8, c: stc });
+    parts.push({ x: -m.stock - 4.6, y: -3.4, w: 1.6, h: 6.8, c: stc });
+  } else if(m.stock && m.stockSt === 'tube'){
+    parts.push({ x: -m.stock - 4, y: -1.6, w: m.stock + 4.6, h: 3.2, c: stc });
+    parts.push({ x: -m.stock - 4.8, y: -3.0, w: 2.2, h: 6.0, c: stc });
+  } else if(m.stock){
+    parts.push({ x: -m.stock - 4, y: m.stockSt === 'fold' ? -3.0 : -2.4, w: m.stock + 4.6, h: m.stockSt === 'fold' ? 6.0 : 4.8, c: stc });
+  }
   parts.push({ x: -1.5, y: -m.bw / 2, w: m.bl + 1.5, h: m.bw, c: body });
   /* 第52单：弹匣不画成死方块，改成可按 id 微调角度的斜插匣（见下方 shape 段） */
-  if(m.fore) parts.push({ x: m.bl * 0.74, y: m.bw / 2 - 0.8, w: 3.2, h: m.fore === 2 ? 4.6 : 3.4, c: dark });
+  if(m.fore) parts.push({ x: m.bl * (m.foreX || 0.74), y: m.bw / 2 - 0.8, w: 3.2, h: m.fore === 2 ? 4.6 : 3.4, c: m.wood ? '#5e4326' : dark });
+  /* 第79单：护木盖住枪管根部，长度按 foreL —— 七把枪露管长度一眼不同（画在枪管块之下，露上下包边） */
+  if(m.tl > 0 && m.foreL){
+    parts.push({ x: m.bl, y: -m.tw / 2 - 0.7, w: m.tl * m.foreL, h: m.tw + 1.4,
+      c: m.wood ? '#6b4a2e' : (m.tan ? '#8a7a52' : dark) });
+  }
   parts.push({ x: m.bl, y: -m.tw / 2, w: m.tl, h: m.tw, c: steel });
   if(m.brake) parts.push({ x: m.bl + m.tl - 3.4, y: -m.tw / 2 - 1, w: 3.4, h: m.tw + 2, c: '#4a555e' });
   if(m.cyl) parts.push({ x: m.bl * 0.36, y: -m.bw / 2 - 0.6, w: 6, h: m.bw + 1.2, c: '#3b444c' });
@@ -7464,30 +7679,34 @@ function drawGun(u, sx, sy, z){
     var r = parts[i];
     ctx.fillStyle = r.c; ctx.fillRect(r.x, r.y, r.w, r.h);
   }
-  // 第52单：直弹匣（步枪/冲锋枪/狙击/手枪加长匣共用）—— 角度按 m.magAng 斜插
+  // 第52单：直弹匣（步枪/冲锋枪/狙击/手枪加长匣共用）—— 角度按 m.magAng 斜插，横向位置按 m.magX（第79单：无托枪弹匣靠后）
   if(m.mag && !m.curveMag){
     var mh2 = m.magLen || 10, mw2 = m.shape === 'ar' ? 3.6 : m.shape === 'smg' ? 3.0 : 4;
     ctx.save();
-    ctx.translate(m.bl * 0.42, m.bw / 2 - 0.8);
+    ctx.translate(m.bl * (m.magX || 0.42), m.bw / 2 - 0.8);
     ctx.rotate(m.magAng || 0);
     ctx.fillStyle = 'rgba(4,6,9,.85)'; ctx.fillRect(-1.1, -1, mw2 + 2.2, mh2 + 1.8);
-    ctx.fillStyle = dark; ctx.fillRect(0, 0, mw2, mh2);
+    ctx.fillStyle = m.trans ? 'rgba(150,182,205,.55)' : dark; ctx.fillRect(0, 0, mw2, mh2);
     ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(0.5, 1.2, 0.9, mh2 - 2.4);
     ctx.restore();
   }
-  // §21 弯弹匣（冲锋枪）：用梯形+斜底画出发散的曲匣剪影，与其他枪的直匣一眼可分
+  // §21 弯弹匣（冲锋枪）：用梯形+斜底画出发散的曲匣剪影，与其他枪的直匣一眼可分（第79单：AK/95式/G36C 复用，位置按 magX）
   if(m.curveMag){
-    var cmx = m.bl * 0.42, cmy = m.bw / 2 - 0.8, cmh = m.magLen || 8;
+    var cmx = m.bl * (m.magX || 0.42), cmy = m.bw / 2 - 0.8, cmh = m.magLen || 8;
     ctx.fillStyle = 'rgba(4,6,9,.85)';
     ctx.beginPath();
     ctx.moveTo(cmx - 1.2, cmy - 1); ctx.lineTo(cmx + 5.6, cmy - 1);
     ctx.lineTo(cmx + 7.4, cmy + cmh); ctx.lineTo(cmx + 1.4, cmy + cmh - 0.6);
     ctx.closePath(); ctx.fill();
-    ctx.fillStyle = dark;
+    ctx.fillStyle = m.trans ? 'rgba(150,182,205,.55)' : dark;
     ctx.beginPath();
     ctx.moveTo(cmx, cmy); ctx.lineTo(cmx + 4.4, cmy);
     ctx.lineTo(cmx + 6, cmy + cmh - 0.8); ctx.lineTo(cmx + 1.2, cmy + cmh - 1.2);
     ctx.closePath(); ctx.fill();
+    if(m.trans){
+      ctx.strokeStyle = 'rgba(210,230,245,.5)'; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.moveTo(cmx + 2.6, cmy + 0.6); ctx.lineTo(cmx + 4.2, cmy + cmh - 1.4); ctx.stroke();
+    }
   }
   // 高光 / 暗边
   ctx.fillStyle = hi; ctx.fillRect(-1.5, -m.bw / 2, m.bl + 1.5, 1.6);
@@ -7520,11 +7739,34 @@ function drawGun(u, sx, sy, z){
     ctx.fillStyle = 'rgba(4,6,9,.85)'; ctx.fillRect(-m.stock - 8.2, -3.4, 1.6, 6.4);
     ctx.fillStyle = dark; ctx.fillRect(m.bl * 0.7, m.bw / 2 - 1, 2.6, 5.2);
   } else if(shp === 'ar' || shp === 'dmr'){
-    /* 步枪/精确射手：提把 + 护木散热孔 */
-    ctx.fillStyle = '#39454f'; ctx.fillRect(m.bl * 0.34, -m.bw / 2 - 2.2, 6.4, 2.2);
-    ctx.fillStyle = 'rgba(4,6,9,.7)'; ctx.fillRect(m.bl * 0.34 + 1, -m.bw / 2 - 1.9, 1.4, 1.6);
-    ctx.fillStyle = 'rgba(10,16,22,.55)';
-    for(i = 0; i < 3; i++) ctx.fillRect(m.bl * 0.72 + i * 2.6, -1.1, 1.6, 2.2);
+    if(m.art){
+      /* 第79单：七把点名枪各自的上机匣特征 —— 提把 / 平顶皮轨 / 无托脊线，一眼分型 */
+      if(m.rail){
+        ctx.fillStyle = '#39454f'; ctx.fillRect(-1.5, -m.bw / 2 - 1.4, m.bl + 1.5, 1.4);
+        ctx.fillStyle = 'rgba(10,16,22,.6)';
+        for(i = 0; i < 6; i++) ctx.fillRect(m.bl * 0.12 + i * 3, -m.bw / 2 - 1.1, 1.2, 0.9);
+      } else if(m.bullpup){
+        ctx.fillStyle = '#39454f';
+        ctx.fillRect(m.bl * 0.18, -m.bw / 2 - 1.6, m.bl * 0.82 + m.tl * 0.4, 1.6);
+        ctx.fillStyle = dark;
+        ctx.fillRect(m.bl * 0.30, m.bw / 2 - 0.6, 3.0, 4.4);   /* 无托枪的握把在弹匣前 */
+      } else if(m.carry){
+        ctx.fillStyle = '#39454f'; ctx.fillRect(m.bl * 0.22, -m.bw / 2 - 2.2, m.bl * 0.52, 2.2);
+        ctx.fillStyle = 'rgba(4,6,9,.7)'; ctx.fillRect(m.bl * 0.34, -m.bw / 2 - 1.9, 1.4, 1.6);
+      } else {
+        ctx.fillStyle = '#39454f'; ctx.fillRect(-1.5, -m.bw / 2 - 1.4, m.bl + 1.5, 1.4);
+      }
+      if(m.wood){
+        ctx.fillStyle = 'rgba(10,16,22,.5)';
+        for(i = 0; i < 2; i++) ctx.fillRect(m.bl * (m.magX || 0.42) + 7 + i * 3.4, -1.1, 1.6, 2.2);
+      }
+    } else {
+      /* 步枪/精确射手（通用型）：提把 + 护木散热孔 */
+      ctx.fillStyle = '#39454f'; ctx.fillRect(m.bl * 0.34, -m.bw / 2 - 2.2, 6.4, 2.2);
+      ctx.fillStyle = 'rgba(4,6,9,.7)'; ctx.fillRect(m.bl * 0.34 + 1, -m.bw / 2 - 1.9, 1.4, 1.6);
+      ctx.fillStyle = 'rgba(10,16,22,.55)';
+      for(i = 0; i < 3; i++) ctx.fillRect(m.bl * 0.72 + i * 2.6, -1.1, 1.6, 2.2);
+    }
   } else if(shp === 'sniper'){
     /* 狙击：大瞄具（长筒 + 双镜圈）+ 长托腮板 + 枪管散热槽 */
     ctx.fillStyle = '#3b4a56'; ctx.fillRect(m.bl * 0.14, -m.bw / 2 - 5.2, 20, 2.8);
@@ -7891,10 +8133,11 @@ function outlineOf(u){
   return OUTLINE_COL.enemy;
 }
 /* ==== 第41单：人物两只手（Canvas 手绘，无外部图）====
-   半径 = 躯干半径 × 0.42；持枪前手 0.85R、后手 0.55R 沿 aim；肤色圆点 + 2px 深色描边。
+   第74C单收紧：半径 = 躯干半径 × 0.34；持枪前手 0.72R、后手 0.45R 沿 aim（手不浮出球外）；
+   肤色圆点 + 1.5px 深色描边；手臂连线压在球后面画（本地玩家/主页走 drawPlayerAvatar），不许横穿球面。
    开火抖 1.5px（随机方向，3 帧回位）；换弹 0.4s / 投掷 0.3s / 近战 0.18s 动作。 */
-var HAND_CFG = { scale:0.42, frontR:0.85, backR:0.55, shakePx:1.5, shakeFrames:3,
-  outline:2, skin:{ player:'#e8b98f', ally:'#d6a583', enemy:'#c99877', civ:'#e6c19c' },
+var HAND_CFG = { scale:0.34, frontR:0.72, backR:0.45, shakePx:1.5, shakeFrames:3,
+  outline:1.5, skin:{ player:'#e8b98f', ally:'#d6a583', enemy:'#c99877', civ:'#e6c19c' },
   reloadSec:0.4, throwSec:0.3, meleeSec:0.18, shadowA:0.18, shadowRX:1.3, shadowRY:0.7 };
 function handSkin(u){
   if(u === P) return HAND_CFG.skin.player;
@@ -7957,7 +8200,9 @@ function drawOutfitDetail(u, sx, sy, r){
   }
   ctx.restore();
 }
-function drawHands(u, sx, sy, r){
+/* 第74C单：手的公共取点/取色 —— drawHands 与 drawPlayerAvatar 共用这一份，不留第二份手绘。
+   顺带推进手部计时（开火抖 / 换弹·投掷·近战动作），每帧每单位只走一次。 */
+function handPoints(u, sx, sy, r){
   if(u.handShake > 0){
     u.handShake--;
     if(u.handShake <= 0){ u.handShakeX = 0; u.handShakeY = 0; }
@@ -7970,18 +8215,73 @@ function drawHands(u, sx, sy, r){
   var fy = sy + sa * r * HAND_CFG.frontR + off.fy * (r / BODY_R);
   var bx = sx - ca * r * HAND_CFG.backR + off.bx * (r / BODY_R);
   var by = sy - sa * r * HAND_CFG.backR + off.by * (r / BODY_R);
-  var skin = handSkin(u);
-  var edge = outlineOf(u).out;
+  return { fx: fx, fy: fy, bx: bx, by: by, hr: hr,
+    skin: u.playerSkin ? HAND_CFG.skin.player : handSkin(u),
+    edge: u.playerSkin ? OUTLINE_COL.player.out : outlineOf(u).out };
+}
+function drawHandDots(hp){
+  ctx.fillStyle = hp.skin; ctx.strokeStyle = hp.edge; ctx.lineWidth = HAND_CFG.outline;
+  ctx.beginPath(); ctx.arc(hp.fx, hp.fy, hp.hr, 0, 6.283); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(hp.bx, hp.by, hp.hr, 0, 6.283); ctx.fill(); ctx.stroke();
+}
+function drawHands(u, sx, sy, r){
+  var hp = handPoints(u, sx, sy, r);
   ctx.save();
-  /* 短粗线当手臂：后手 → 前手 */
-  ctx.strokeStyle = edge; ctx.lineWidth = Math.max(1, hr * 0.7); ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(fx, fy); ctx.stroke();
-  /* 两只手：肤色圆点 + 2px 深色描边 */
-  ctx.fillStyle = skin; ctx.strokeStyle = edge; ctx.lineWidth = HAND_CFG.outline;
-  ctx.beginPath(); ctx.arc(fx, fy, hr, 0, 6.283); ctx.fill(); ctx.stroke();
-  ctx.beginPath(); ctx.arc(bx, by, hr, 0, 6.283); ctx.fill(); ctx.stroke();
+  /* 短粗线当手臂：后手 → 前手（敌人/队友仍压在球面上画；本地玩家走 drawPlayerAvatar 藏到球后） */
+  ctx.strokeStyle = hp.edge; ctx.lineWidth = Math.max(1, hp.hr * 0.7); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(hp.bx, hp.by); ctx.lineTo(hp.fx, hp.fy); ctx.stroke();
+  drawHandDots(hp);
   ctx.restore();
 }
+/* ==== 第74C单：公用人物画法 drawPlayerAvatar —— 局内本地玩家与主页同一套，改局内主页自动跟变。
+   一次画完「球身（局内同款底色/双描边）+ 两只手（HAND_CFG）+ 当前枪（drawGun）」。
+   层级：枪(先画,被圆压住握把) → 手臂连线(藏球后,不许出现横穿的手杆) → 球身 → opts.preHands 钩子 → 两只手。
+   g=目标画布上下文（drawGun 只认全局 ctx，这里临时接管再还回，与 part-08 截图同款套路）；
+   opts.unit=局内真实单位（走 unitColor/outlineOf，枪按它的 wid/配件）；不给 unit = 主页模式（按 gunId 画枪，
+   球身用当前服装色、描边/肤色用玩家配色，gunId 为空即跑刀不画枪）；opts.z=枪的世界缩放（局内传 zoom*unitScale()，
+   不含姿态系数）；opts.preHands=球画完、手画前回调（局内塞服装细节，保住原层级）。 */
+function drawPlayerAvatar(g, cx, cy, R, aim, gunId, opts){
+  opts = opts || {};
+  var u = opts.unit;
+  if(!u) u = { wid: gunId || '', weapon: gunId || '', team: 'ally', aim: aim, alive: true, playerSkin: true };
+  var z = opts.z || (R / BODY_R);
+  var hp = handPoints(u, cx, cy, R);
+  var oc = opts.unit ? outlineOf(u) : OUTLINE_COL.player;
+  var old = ctx; ctx = g;
+  ctx.save();
+  /* 当前枪：先画，被圆压住握把（局内同层）；主页没主武器（跑刀）就不画 */
+  if(u.alive && (opts.unit || gunId)) drawGun(u, cx, cy, z);
+  /* 手臂连线：压在球后面，藏在球体后面 */
+  ctx.strokeStyle = hp.edge; ctx.lineWidth = Math.max(1, hp.hr * 0.7); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(hp.bx, hp.by); ctx.lineTo(hp.fx, hp.fy); ctx.stroke();
+  /* 球身：局内 drawUnit 同款底色 + 外深内亮双描边 */
+  ctx.fillStyle = opts.unit ? unitColor(u) : outfitById(outfitGet()).col;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.fill();
+  ctx.strokeStyle = oc.out; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, R + 0.5, 0, 6.283); ctx.stroke();
+  ctx.strokeStyle = oc.in; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, R - 0.6, 0, 6.283); ctx.stroke();
+  if(opts.preHands) opts.preHands();
+  /* 两只手：肤色圆点 + 描边（画法只有 drawHandDots 这一份） */
+  drawHandDots(hp);
+  ctx.restore();
+  ctx = old;
+}
+/* 第74C单：只读手位探针 —— __TQ 本体在 part-08 §22 才创建，先备函数，__TQ 出现后自动补挂
+   frontR/backR：前/后手距球心（×躯干半径）；handPx：手径（世界px，球径=2×BODY_R=12）；
+   gunGapPx：枪身起点（枪身最后端，世界→屏幕px）到前手位置的距离 */
+function tqHandsProbe(){
+  if(!P) return null;
+  var m = gunSpec(P), gsv = gunDisplayScale(P);
+  var rearL = m.stock ? (BODY_R * 0.95 - m.stock - 4) : (BODY_R * 0.95 - 1.5);
+  return { frontR: HAND_CFG.frontR, backR: HAND_CFG.backR,
+    handPx: +(2 * BODY_R * HAND_CFG.scale).toFixed(2),
+    gunGapPx: +((BODY_R * HAND_CFG.frontR - rearL * gsv) * zoom * unitScale()).toFixed(1) };
+}
+(function tqHandsProbeInstall(){
+  if(window.__TQ){ if(!window.__TQ.hands) window.__TQ.hands = tqHandsProbe; return; }
+  setTimeout(tqHandsProbeInstall, 0);
+})();
 
 function drawUnit(u){
   var sx = w2sx(u.x), sy = w2sy(u.y), zw = zoom, z = zoom * unitScale();
@@ -8011,9 +8311,7 @@ function drawUnit(u){
     ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, ev.range * zw, -ev.fov / 2, ev.fov / 2); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
-  // 枪从圆的边缘朝前伸（先画，被圆压住握把）；远景剪影不画枪
-  if(u.alive && !far) drawGun(u, sx, sy, z);
-
+  /* 第74C单：枪改在下面分支里画（本地玩家由 drawPlayerAvatar 画，其余单位仍由 drawUnit 画） */
   var stance = (u === P) ? P.stance : 'stand';
   var rk = stance === 'prone' ? 0.70 : stance === 'crouch' ? 0.86 : 1;
   var r = BODY_R * rk * z;
@@ -8035,19 +8333,28 @@ function drawUnit(u){
     ctx.fillStyle = 'rgba(3,7,11,0.34)';
     ctx.beginPath(); ctx.ellipse(sx - r * 0.34, sy + r * 0.42, r * 0.96, r * 0.56, 0, 0, 6.283); ctx.fill();
   }
-  ctx.fillStyle = col;
-  ctx.beginPath(); ctx.arc(sx, sy, r, 0, 6.283); ctx.fill();
-  // §21 轮廓描边：1px 深色外描边 + 内侧 1px 亮边，阵营分色；远景剪影不描（沿用 §32.7）
-  if(!far){
-    var oc = outlineOf(u);
-    ctx.strokeStyle = oc.out; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(sx, sy, r + 0.5, 0, 6.283); ctx.stroke();
-    ctx.strokeStyle = oc.in; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(sx, sy, r - 0.6, 0, 6.283); ctx.stroke();
+  /* 第74C单：本地玩家「球身+两只手+当前枪」改走 drawPlayerAvatar（与主页同一画法）；
+     视野锥 / 脚下影子 / 服装细节（preHands 钩子，层级不变）/ 白闪 / 投降环仍由 drawUnit 自己画 */
+  if(u === P && !far && u.alive){
+    drawPlayerAvatar(ctx, sx, sy, r, u.aim, '', { unit: u, z: z,
+      preHands: function(){ drawOutfitDetail(u, sx, sy, r); } });
+  } else {
+    // 枪从圆的边缘朝前伸（先画，被圆压住握把）；远景剪影不画枪
+    if(u.alive && !far) drawGun(u, sx, sy, z);
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, 6.283); ctx.fill();
+    // §21 轮廓描边：1px 深色外描边 + 内侧 1px 亮边，阵营分色；远景剪影不描（沿用 §32.7）
+    if(!far){
+      var oc = outlineOf(u);
+      ctx.strokeStyle = oc.out; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(sx, sy, r + 0.5, 0, 6.283); ctx.stroke();
+      ctx.strokeStyle = oc.in; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(sx, sy, r - 0.6, 0, 6.283); ctx.stroke();
+    }
+    // 第41单：服装细节（领口/帽型/围巾，只本地玩家） + 两只手（全单位，远景剪影除外）
+    if(!far && u.alive) drawOutfitDetail(u, sx, sy, r);
+    if(!far && u.alive) drawHands(u, sx, sy, r);
   }
-  // 第41单：服装细节（领口/帽型/围巾，只本地玩家） + 两只手（全单位，远景剪影除外）
-  if(!far && u.alive) drawOutfitDetail(u, sx, sy, r);
-  if(!far && u.alive) drawHands(u, sx, sy, r);
   if(!far && u.alive && u.whiteT > 0){
     ctx.fillStyle = 'rgba(255,255,255,' + (0.75 * Math.min(1, u.whiteT / 0.04)).toFixed(2) + ')';
     ctx.beginPath(); ctx.arc(sx, sy, r, 0, 6.283); ctx.fill();
@@ -9180,6 +9487,12 @@ var netHeard = [];          /* 被听见的位置 [{x,y,t}]，3 秒后消失 */
 function netVisUnits(){
   var out = [], i, cand;
   if(!P || net.role === 'off') return out;
+  /* 第76单（秋「还显示队友」）：1v1 决斗只报对手一个，永远不报队友/bot ——
+     不论 net.remote.team 字段被填成什么都强制按 foe（对手）算。 */
+  if(net.mode === 'duel'){
+    if(net.remote && net.remote !== P && net.remote.alive) out.push({ u: net.remote, kind: 'foe' });
+    return out;
+  }
   cand = [net.remote, net.botA, net.botB];
   for(i = 0; i < cand.length; i++){
     var u = cand[i];
@@ -9281,6 +9594,9 @@ function netVisUpdate(dt){
 function netVisText(){
   var list = netVisUnits(), i, best = null, bestD = 1e9, d;
   if(!P || net.role === 'off' || S.phase !== 'play' || S.minimapOpen) return;
+  /* 第76单：距离必须是真实世界距离（hypot / PX_PER_M，与格→米同口径）。
+     位置数据断流 >800ms 时坐标可能停在旧点上，误差会超过 2 米 —— 宁可整行不显示。 */
+  if(net.rxTime && Date.now() - net.rxTime > 800) return;
   for(i = 0; i < list.length; i++){                       /* 先找最近的对手，没有再看队友 */
     if(list[i].kind !== 'foe') continue;
     d = Math.hypot(list[i].u.x - P.x, list[i].u.y - P.y);
@@ -11299,7 +11615,7 @@ function renderStoryBriefing(chId){
       else { STORY.sel.push(sid); STORY.note = ''; }
       renderStoryBriefing(); return;
     }
-    if(e.target.id === 'sbGo'){ storyApplyEnv(ch); renderLoadout(); }
+    if(e.target.id === 'sbGo'){ storyApplyEnv(ch); openStashGoBar(); }   /* 第74F单：起装备直接进仓库，滚到底部出发条 */
     else if(e.target.id === 'sbReintro'){ runIntro(ch.id); }   /* §35-B 重看开场 */
     else if(e.target.id === 'sbSkip'){ storyExit(); renderMenu(); }
   };
@@ -11454,43 +11770,13 @@ function drawMenuAvatar(){
   for(i=0;i<=H;i+=20){ g.moveTo(0,i+.5); g.lineTo(W,i+.5); }
   g.stroke();
   g.fillStyle = 'rgba(0,0,0,.55)'; g.beginPath(); g.ellipse(130,311,66,13,0,0,Math.PI*2); g.fill();
-  /* 第74A单：球就是身体 —— 半径 56 圆，底 #1b2b3a / 描边 #4a7fa5 1.5px；不要头、不要脸、不要腿 */
-  g.fillStyle = '#1b2b3a'; g.strokeStyle = '#4a7fa5'; g.lineWidth = 1.5;
-  g.beginPath(); g.arc(130,142,56,0,Math.PI*2); g.fill(); g.stroke();
-  /* 左上鲸鳍三角（沿用第52单） */
-  g.fillStyle = '#2b5878'; g.strokeStyle = '#4a7fa5'; g.lineWidth = 1.6;
-  g.beginPath(); g.moveTo(84,116); g.lineTo(62,92); g.lineTo(92,100); g.closePath();
-  g.fill(); g.stroke();
-  /* 右上高光弧 */
-  g.strokeStyle = 'rgba(150,205,235,.55)'; g.lineWidth = 3;
-  g.beginPath(); g.arc(130,142,45,Math.PI*1.55,Math.PI*1.98); g.stroke();
-  // 当前装备的枪：画在两手之间、球前方偏下，沿用 drawGun 轮廓缩小到宽约 96px
-  var L = LO() || {}, gid = L.primary || 'm4';
-  var mods = gunModList(gid).map(function(m){ return m.slot + ':' + m.id; }).join(' ');
-  var has = function(re){ return new RegExp(re,'i').test(mods); };
-  var cat = weaponCat(gid), glen = Math.round(112 * (   /* 主枪型(rifle)宽约 96px */
-    cat === 'pistol' ? 0.52 : cat === 'smg' ? 0.68 :
-    (cat === 'dmr' || cat === 'sniper') ? 1 : cat === 'shotgun' ? 0.92 : 0.86));
-  var gx = 130 - glen / 2, gy = 194;   /* 球底 y=198，枪压在球前方偏下 */
-  if(cat !== 'pistol' && cat !== 'smg'){ g.fillStyle = '#1a252f'; rr(gx,gy-3,28,11,3); g.fill(); }
-  g.fillStyle = '#3c5163'; rr(gx+(cat==='pistol'?0:24),gy-7,glen-(cat==='pistol'?10:40),14,3); g.fill();
-  g.fillStyle = '#5b7488'; g.fillRect(gx+glen-22,gy-3,22,6);
-  g.fillStyle = '#8aa2b4'; g.fillRect(gx+30,gy-7,Math.max(12,glen-50),2);
-  if(cat === 'dmr' || cat === 'sniper'){ g.fillStyle = '#2d3d4a'; rr(gx+34,gy-15,30,8,2); g.fill(); }
-  if(cat === 'shotgun'){ g.fillStyle = '#243543'; g.fillRect(gx+glen-44,gy+7,34,5); }
-  if(cat !== 'pistol' || has('mag')){ g.fillStyle = '#1e2c38'; g.beginPath();
-    g.moveTo(gx+glen*0.52,gy+7); g.lineTo(gx+glen*0.52+18,gy+7);
-    g.lineTo(gx+glen*0.52+14,gy+(cat==='smg'?22:27)); g.lineTo(gx+glen*0.52+4,gy+(cat==='smg'?22:27));
-    g.closePath(); g.fill(); }
-  if(has('optic|scope|sight') || cat === 'dmr' || cat === 'sniper'){
-    g.fillStyle = '#4d6477'; rr(gx+glen*0.44,gy-17,24,10,2); g.fill();
-    g.fillStyle = '#7fc7e8'; g.fillRect(gx+glen*0.44+3,gy-15,4,6); }
-  if(has('muzzle|brake|supp')){ g.fillStyle = '#46596a'; rr(gx+glen-18,gy-9,20,12,3); g.fill(); }
-  if(has('grip|fore')){ g.fillStyle = '#243543'; rr(gx+glen*0.28,gy+7,12,12,2); g.fill(); }
-  /* 两只手：椭圆 rx9/ry7（肤色 #e8c9a0 + 深色描边 1px），从球下半两侧伸出共同握枪 */
-  g.fillStyle = '#e8c9a0'; g.strokeStyle = '#0a131d'; g.lineWidth = 1;
-  g.beginPath(); g.ellipse(gx+10,gy+4,9,7,0,0,Math.PI*2); g.fill(); g.stroke();
-  g.beginPath(); g.ellipse(gx+glen-10,gy+4,9,7,0,0,Math.PI*2); g.fill(); g.stroke();
+  /* 第74C单：主页人物 = 局内那颗球 —— 自绘的球/鲸鳍三角/高光弧/枪/手全部删掉，
+     换成一次调用 drawPlayerAvatar（与局内 drawUnit 同一画法，以后改局内主页自动跟着变）。
+     aim0 为静止角（右下 ≈57°），不许摆动；当前主武器为空（跑刀）就不画枪。
+     脚下阴影椭圆（上面那行）、护甲盾 / 背包小图标（下面）按单子保留。 */
+  var L = LO() || {};
+  var aim0 = 1.0;
+  drawPlayerAvatar(g, 130, 142, 56, aim0, L.primary || '');
   /* 左右装备小图标（圆 22px，半透明底 + 1px 边框）：左=护甲盾，右=背包；没装画空心虚线圆 */
   var ak = armorKeyOfId(L.armor);
   var pkC = (typeof EQUIP !== 'undefined' && typeof CONTAINERS !== 'undefined' && CONTAINERS[EQUIP.pack]) || null;
@@ -11542,9 +11828,10 @@ function renderMenu(){
     '<div class="dBot"><button id="dGo">出 发</button>' +
       '<div class="dMap"><div class="dMapRow">' +
         '<button id="dMapPrev" title="上一张地图">◀</button>' +
-        '<span class="dMapName" id="dMapName">' + mapDef.name + '</span>' +
+        '<span class="dMapName" id="dMapName">' + (mapDef.lootMul ? mapDef.name + ' · 搜刮' : mapDef.name) + '</span>' +   /* 第74D单：搜刮图名字加标记 */
         '<button id="dMapNext" title="下一张地图">▶</button></div>' +
         '<div class="dMapSub">' + modeName() + ' · ' + DF().name + ' · ' + weatherName2() + '</div>' +
+        (mapDef.lootMul ? '<div class="dMapSub">容器 ×' + mapDef.lootMul.toFixed(1) + '</div>' : '') +   /* 第74D单：倍率小字，只有搜刮图显示 */
       '</div></div>' +
     '<div class="dTip">Esc 暂停 · 设置里有键位表</div>';
   box.onclick = function(e){
@@ -11810,13 +12097,13 @@ function renderLoadout(){
     return '<div class="ld3row' + (on ? ' on' : '') + (afford ? '' : ' off') + '"' + (on ? ' id="ld3sel"' : '') + ' data-wid="' + id + '">' +
       '<span>' + WEAPONS[id].name + '</span><span class="e">₡' + ld3Cents(id) + '</span></div>';
   }).join('');
-  /* §33.2 剧情页：底部摘要 + 出发闸门（剩余 < 0 或没枪 → 灰） */
+  /* §33.2 剧情页：底部摘要 + 出发闸门（剩余 < 0 → 灰；第74C单：没主武器也放行，跑刀局内用近战/刀） */
   var resTxt = 0;
   if(inStory && gear.gun){
     var rk = WEAPONS[gear.gun].cat === 'dmr' ? 'sniper' : WEAPONS[gear.gun].cat;
     if(STORY_ECO.ammo[rk] && gear.ammo[rk]) resTxt = gear.ammo[rk] * STORY_ECO.ammo[rk].per;
   }
-  var goOff = inStory ? (!gear.gun || left < 0) : !ok;
+  var goOff = inStory ? (left < 0) : !ok;   /* 第74C单：闸门只看「剩余 < 0」，无主武器也放行（跑刀） */
   var footInner = inStory ?
     '当前配装 <b>' + (gear.gun ? WEAPONS[gear.gun].name : '未购枪') + '</b>' +
       (gear.gun ? ' · 配件 <b>₡' + modsCost(gear.gun) + '</b>' : '') +
@@ -11897,7 +12184,7 @@ function renderLoadout(){
     if(t.id === 'ld3Gun'){ openGunsmith('loadout'); return; }   /* §33.3 剧情态进改枪：配件计入预算 */
     if(t.id === 'ld3Equip'){ ld3Equip(); return; }
     if(t.id === 'ldGo'){
-      if(inStory ? (!gear.gun || left < 0) : ldCost() > BUDGET) return;
+      if(inStory ? (left < 0) : ldCost() > BUDGET) return;   /* 第74C单：只拦「剩余 < 0」，跑刀放行 */
       try{ localStorage.setItem(LD_LAST, JSON.stringify(LO())); }catch(err){}
       if(menuState.allies && menuState.mode !== 'dm') renderPrep();
       else {
@@ -11950,7 +12237,7 @@ function renderPrep(){
     }, 1000);
   }, 1500);
   box.onclick = function(e){
-    if(e.target.id === 'prepBack'){ prepToken++; renderLoadout(); }
+    if(e.target.id === 'prepBack'){ prepToken++; openStashGoBar(); }   /* 第74F单：取消准备回仓库出发条，不再回 ld3 */
   };
 }
 
@@ -12364,6 +12651,8 @@ function presetApply(k){             /* 一键套用；剧情态超预算 → �
     for(i = 0; i < MOD_ORDER.length; i++){ s = MOD_ORDER[i]; loadout[wid][s] = want2[s] || MOD_DEF[s]; }
   }
   menuState.weapon = wid;
+  loadoutSave();                     /* 第79单：装配状态落盘 */
+  if(typeof gsPvReset === 'function') gsPvReset(wid);   /* 第79单：预览同步，别让旧预览盖回来 */
   renderGunsmith();
 }
 
@@ -12410,7 +12699,10 @@ var CONTAINERS = {
   rg_m:{id:'rg_m',n:'战术胸挂',cat:'rig',cols:6,rows:4,price:1800,kg:0},
   rg_l:{id:'rg_l',n:'重型胸挂',cat:'rig',cols:8,rows:4,price:3600,kg:0}
 };
-var EQUIP_LS = tqKey('tq_equip'), EQUIP = {pack:'pk_s', rig:'rg_m'};
+/* 第74C单：默认不带任何容器 —— 没装容器就没有格子（PACK/RIG_COLS/ROWS=0），重量上限只算基础负重。
+   CONTAINERS.pk_s / rg_m 不再当兜底；已拥有（STASH 里有）的容器照旧可装备/卸下。 */
+var EQUIP_BASE_KG = 10;   /* 无背包时的人物基础负重（kg），小于最小背包 pk_s 的 25kg */
+var EQUIP_LS = tqKey('tq_equip'), EQUIP = {pack:null, rig:null};
 function equipLoad(){
   var o = null;
   try{ o = JSON.parse(localStorage.getItem(EQUIP_LS) || 'null'); }catch(e){}
@@ -12422,16 +12714,19 @@ function equipLoad(){
 function equipSave(){ try{ localStorage.setItem(EQUIP_LS, JSON.stringify(EQUIP)); }catch(e){} }
 function equipApply(){
   equipLoad();
-  var p = CONTAINERS[EQUIP.pack] || CONTAINERS.pk_s, r = CONTAINERS[EQUIP.rig] || CONTAINERS.rg_m;
-  PACK_COLS = p.cols; PACK_ROWS = p.rows; PACK_KG_MAX = p.kg; PACK.cols = p.cols; PACK.rows = p.rows;
-  RIG_COLS = r.cols; RIG_ROWS = r.rows; RIG.cols = r.cols; RIG.rows = r.rows;
+  var p = CONTAINERS[EQUIP.pack], r = CONTAINERS[EQUIP.rig];   /* 第74C单：没装就是 null，无兜底 */
+  PACK_COLS = p ? p.cols : 0; PACK_ROWS = p ? p.rows : 0;
+  PACK_KG_MAX = p ? p.kg : EQUIP_BASE_KG; PACK.cols = PACK_COLS; PACK.rows = PACK_ROWS;
+  RIG_COLS = r ? r.cols : 0; RIG_ROWS = r ? r.rows : 0; RIG.cols = RIG_COLS; RIG.rows = RIG_ROWS;
 }
 function equipHTML(){
   function row(kind, label){
-    var id = EQUIP[kind], dflt = kind === 'pack' ? CONTAINERS.pk_s : CONTAINERS.rg_m;
-    var c = CONTAINERS[id] || dflt;
-    var h = '<div class="strow"><span>' + label + '</span><b>' + c.n + ' ' + c.cols + '×' + c.rows +
-      (c.kg ? ' · ' + c.kg + 'kg' : '') + '</b></div>';
+    var id = EQUIP[kind], c = id ? CONTAINERS[id] : null;
+    var h = '<div class="strow"><span>' + label + '</span><b>' +
+      (c ? c.n + ' ' + c.cols + '×' + c.rows + (c.kg ? ' · ' + c.kg + 'kg' : '')
+         : '未装备 · 0×0') + '</b></div>';   /* 第74C单：没装容器显示「未装备 · 0×0」，不显示默认容器名 */
+    if(c) h += '<button class="eqbtn" data-unequip="' + kind + '"' +
+      ' style="margin:3px 4px 0 0;padding:3px 6px;font-size:11px">卸下 ' + c.n + '</button>';
     var owned = {}, i, it, g, cid;
     stashLoad();
     for(i = 0; i < STASH.items.length; i++){
@@ -12465,7 +12760,7 @@ function equipContainer(id){
   var moved = 0, bad = false;
   for(i = 0; i < over.length; i++){
     it = over[i];
-    if(!stashAddUnits(it.id, it.qty || 1, it.dur == null ? 1 : it.dur, true).ok){ bad = true; break; }
+    if(!stashAddUnits(it.id, it.qty || 1, it.dur == null ? 1 : it.dur, true, it.q || 0).ok){ bad = true; break; }
     var k = arr.indexOf(it); if(k >= 0) arr.splice(k, 1);
     moved++;
   }
@@ -12478,6 +12773,29 @@ function equipContainer(id){
   var nm = c.cat === 'pack' ? '背包' : '胸挂';
   stashNote = moved ? (nm + '放不下 ' + moved + ' 件，已退回仓库') : ('已装备 ' + c.n + '（' + c.cols + '×' + c.rows + '）');
   stashNoteBad = !!moved; renderStash(); return true;
+}
+/* 第74C单：卸下容器 —— 格子立刻归零；里面的东西全部退回仓库，仓库也装不下就整次回滚（绝不吞东西） */
+function equipUnequip(kind){
+  if((kind !== 'pack' && kind !== 'rig') || !EQUIP[kind]) return false;
+  var c = CONTAINERS[EQUIP[kind]], old = EQUIP[kind], snap, arr, list, moved = 0, bad = false, i, it;
+  stashLoad(); snap = JSON.stringify(STASH.items);
+  EQUIP[kind] = null; equipSave(); equipApply();          /* 先归零：0×0 放不下任何东西 */
+  arr = kind === 'pack' ? PACK.items : RIG.items;
+  list = arr.slice();
+  for(i = 0; i < list.length; i++){
+    it = list[i];
+    if(!stashAddUnits(it.id, it.qty || 1, it.dur == null ? 1 : it.dur, true, it.q || 0).ok){ bad = true; break; }
+    moved++;
+  }
+  if(bad){                                   /* 仓库也满 → 整次卸下回滚 */
+    STASH.items = JSON.parse(snap); stashSave();
+    EQUIP[kind] = old; equipSave(); equipApply();
+    stashNote = '卸不下：仓库放不下 ' + c.n + ' 里的东西'; stashNoteBad = true; renderStash(); return false;
+  }
+  arr.length = 0;
+  packSave(); rigSave(); stashSave();
+  stashNote = moved ? ('已卸下 ' + c.n + ' · ' + moved + ' 件退回仓库') : ('已卸下 ' + c.n + '（0×0）');
+  stashNoteBad = false; renderStash(); return true;
 }
 /* 杂货商医疗价目（派单定的五个价，引擎里原先没有这五件货，本表即首份定义） */
 var TRADE_MED = [
@@ -12683,6 +13001,114 @@ function ammoLooseCalOf(it){                /* 一件散装算哪个口径（含
   if(g && g.legacy && g.cal && AMMO_LEGACY_CAL[g.cal]) return AMMO_LEGACY_CAL[g.cal];
   return '';
 }
+/* ==================== 第77单 物品品质（六档 · 全项目唯一一份） ====================
+   q 字段 0–5：0 普通 / 1 优良 / 2 稀有 / 3 史诗 / 4 传说 / 5 神话。缺 q 一律按 0 读。
+   价格：₡实际价 = round10(当日基础价 × mul)；卖出同比例。红档（神话）全局限量：
+   枪 2 把 / 护甲 1 件 / 配件 3 个 / 特异弹 1 种，生成时数一遍，超了降传说。 */
+var QUALS = [
+  { id:'common', n:'普通', c:'#cfd6dd', mul:1.00 },
+  { id:'fine',   n:'优良', c:'#4ade80', mul:1.18 },
+  { id:'rare',   n:'稀有', c:'#38bdf8', mul:1.45 },
+  { id:'epic',   n:'史诗', c:'#a78bfa', mul:1.80 },
+  { id:'legend', n:'传说', c:'#fbbf24', mul:2.30 },
+  { id:'myth',   n:'神话', c:'#f43f5e', mul:3.00 }
+];
+var Q_W_STD = [0.62, 0.22, 0.10, 0.045, 0.013, 0.002];   /* 常规掉落：62/22/10/4.5/1.3/0.2 */
+var Q_W_HOT = [0.45, 0.30, 0.16, 0.065, 0.02, 0.005];    /* 搜刮图(dock/clinic/yard)与交易进货 */
+var Q_LIMIT = { gun: 2, armor: 1, mod: 3, spc: 1 };      /* 红档全局限量 */
+function qOf(it){
+  var q = it && it.q;
+  return (typeof q === 'number' && q >= 0 && q <= 5) ? QUALS[q|0] : QUALS[0];
+}
+function qColorOf(it){ return qOf(it).c; }
+function qNameOf(it){ return qOf(it).n; }
+function qMulNum(qv){ return QUALS[(typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0].mul; }
+function qPriceMul(it){ return qMulNum(it && it.q); }
+function qRound10(v){ return Math.max(10, Math.round(v / 10) * 10); }
+function qRollWith(w, r){                     /* r = 返回 0–1 的函数（可传种子流）；不传用 Math.random */
+  var t = (r ? r() : Math.random()), i;
+  for(i = 0; i < w.length - 1; i++){ if(t < w[i]) return i; t -= w[i]; }
+  return w.length - 1;
+}
+function qRoll(){ return qRollWith(Q_W_STD, null); }      /* 派单指定名：常规权重掷一档 */
+function qCatOfId(id){                        /* 红档限量分类：枪 / 甲 / 配件 / 特异弹（其余不占名额） */
+  var g = TRADE_GOODS[id];
+  if(!g) return '';
+  if(g.gun) return 'gun';
+  if(g.cat === 'armor') return 'armor';
+  if(g.slot || (typeof id === 'string' && id.indexOf('m:') === 0)) return 'mod';
+  if(ammoSpOfId(id)) return 'spc';
+  return '';
+}
+function qCountAll(){                         /* 仓库+背包+胸挂 各品质堆数（堆=1 件，与格数同口径） */
+  var out = { common:0, fine:0, rare:0, epic:0, legend:0, myth:0, total:0 };
+  var lists = [STASH.items, PACK.items, RIG.items], j, i;
+  for(j = 0; j < lists.length; j++) for(i = 0; i < lists[j].length; i++){
+    out[qOf(lists[j][i]).id]++; out.total++;
+  }
+  return out;
+}
+function qMythSpcCollect(){                   /* 现存红档特异弹的「种」表（仓库走盘 + 背包/胸挂走内存） */
+  var kinds = {}, lists = [], j, i, it, s;
+  try{
+    var raw = localStorage.getItem(STASH_LS), o = raw ? JSON.parse(raw) : null;
+    if(o && o.items instanceof Array) lists.push(o.items);
+  }catch(e){}
+  lists.push(PACK.items, RIG.items);
+  for(j = 0; j < lists.length; j++) for(i = 0; i < lists[j].length; i++){
+    it = lists[j][i];
+    if(!it || qOf(it).id !== 'myth') continue;
+    s = ammoSpOfId(it.id);
+    if(s) kinds[s] = 1;
+  }
+  return kinds;
+}
+function qMythCount(cat){                     /* 红档现存量：件数；特异弹返回已占「种」数 */
+  if(cat === 'spc'){ var k = qMythSpcCollect(), n = 0, s; for(s in k) n++; return n; }
+  var n2 = 0, lists = [], j, i, it;
+  try{
+    var raw2 = localStorage.getItem(STASH_LS), o2 = raw2 ? JSON.parse(raw2) : null;
+    if(o2 && o2.items instanceof Array) lists.push(o2.items);
+  }catch(e){}
+  lists.push(PACK.items, RIG.items);
+  for(j = 0; j < lists.length; j++) for(i = 0; i < lists[j].length; i++){
+    it = lists[j][i];
+    if(it && qOf(it).id === 'myth' && qCatOfId(it.id) === cat) n2++;
+  }
+  return n2;
+}
+function qRollForId(id, hot, r, w){           /* 生成统一入口：掷品质；红档超限量降传说。第78单：w 可传容器专属权重 */
+  var q = qRollWith(w || (hot ? Q_W_HOT : Q_W_STD), r), cat = qCatOfId(id), over = false;
+  if(q === 5 && cat && Q_LIMIT[cat] != null){
+    if(cat === 'spc'){
+      var sp = ammoSpOfId(id), kinds = qMythSpcCollect();
+      over = !(sp && kinds[sp]) && (function(){ var n = 0, s; for(s in kinds) n++; return n; })() >= Q_LIMIT.spc;
+    } else over = qMythCount(cat) >= Q_LIMIT[cat];
+    if(over) q = 4;
+  }
+  return q;
+}
+function qArmorDurMul(q){                     /* 护甲耐久上限：神话 +25%，其余按 mul 小步 */
+  var m = qMulNum(q);
+  return m >= 3 ? 1.25 : 1 + (m - 1) * 0.08;
+}
+function qArmorRedAdd(q){                     /* 护甲减伤加成：小步递增，封顶 +4% */
+  return Math.min(0.04, (qMulNum(q) - 1) * 0.022);
+}
+function qBasePrice(id){                      /* 当日行情基础价（不含品质，确定性可重算） */
+  var g = TRADE_GOODS[id];
+  return g ? trPriceOf(g, tradeDayNum(TRADE.day)) : 0;
+}
+function qPriceOf(id, qv){                    /* ₡实际价 = round10(基础价 × mul) */
+  var g = TRADE_GOODS[id];
+  return g ? qRound10(qBasePrice(id) * qMulNum(qv)) : 0;
+}
+function qTagHTML(qv){                        /* 神话名字左侧的红菱形，与传说区分 */
+  return (typeof qv === 'number' && (qv|0) === 5) ? '<i style="color:#f43f5e;font-style:normal">◆ </i>' : '';
+}
+function qColorNum(qv){                       /* 按 q 数字取色（SKU 级显示用，物品实例用 qColorOf） */
+  return QUALS[(typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0].c;
+}
 var TRADE_GOODS = {};       /* id → { id, merch, cat, name, sub, base, gun?, slot?, mid?, src? } */
 var TRADE_ORDER = [];
 (function(){
@@ -12753,6 +13179,18 @@ var TRADE_ORDER = [];
   }
   /* 第41单：维修包 —— 按派单「军火商卖维修包」上架 gun/med，₡600，用后 +40 耐久（2 秒读条） */
   put({ id: 'med:repair_kit', merch: 'gun', cat: 'med', name: '维修包', sub: '工具 · 修 +40 耐久（2 秒）', base: DUR_CFG.kitPrice, kind: 'repair_kit' });
+  /* 第78单：局内六类物资新增货 —— 贵重(g:) / 杂物(j:) / 食品(f:food 水/罐头)。
+     只登记不上货架（putHidden）；基础价落在派单区间：贵重 800–9000 · 杂物 15–120；
+     卖价走现有 60% 结算 = 基础价 × 品质倍率 × 0.6，估值走 qPriceOf = 基础价 × 品质倍率。 */
+  putHidden({ id: 'g:hdd',   merch: '', cat: 'valuable', name: '军用硬盘', sub: '贵重 · 拆下来的存储盘', base: 1400, wh: [1, 1] });
+  putHidden({ id: 'g:gpu',   merch: '', cat: 'valuable', name: '矿卡显卡', sub: '贵重 · 风扇还能转',     base: 2600, wh: [1, 2] });
+  putHidden({ id: 'g:gold',  merch: '', cat: 'valuable', name: '金条',     sub: '贵重 · 压手',           base: 4800, wh: [1, 2] });
+  putHidden({ id: 'g:watch', merch: '', cat: 'valuable', name: '军官怀表', sub: '贵重 · 还能走',         base: 900,  wh: [1, 1] });
+  putHidden({ id: 'j:screw', merch: '', cat: 'junk', name: '螺丝包',   sub: '杂物 · 一小袋',       base: 20, wh: [1, 1] });
+  putHidden({ id: 'j:batt',  merch: '', cat: 'junk', name: '锂电池',   sub: '杂物 · 电量存疑',     base: 65, wh: [1, 1] });
+  putHidden({ id: 'j:tape',  merch: '', cat: 'junk', name: '军用胶带', sub: '杂物 · 什么都能补',   base: 40, wh: [1, 1] });
+  putHidden({ id: 'f:water', merch: '', cat: 'junk', kind: 'food', food: 8, name: '瓶装水',   sub: '食品 · 回 8 体力', base: 35, wh: [1, 1] });
+  putHidden({ id: 'f:can',   merch: '', cat: 'junk', kind: 'food', food: 8, name: '军用罐头', sub: '食品 · 回 8 体力', base: 55, wh: [1, 1] });
   /* 第40单：护甲六档 —— 军火商卖 lv1–4，黑市卖 lv5–6（沿用现有商人，不新增） */
   for(i = 0; i < ARMOR_ORDER.length; i++){
     var av = ARMOR[ARMOR_ORDER[i]];
@@ -13084,10 +13522,11 @@ function drawAmmoRing(){                      /* 右下角进度环 + 文字（C
   ctx.restore();
 }
 
-var TRADE = { day: '', prices: {}, stock: {}, cart: {}, hold: {} };
+var TRADE = { day: '', prices: {}, stock: {}, cart: {}, hold: {}, q: {} };
 var tradeOpen = false;
 var TRADE_SEL = 'gun';        /* 当前商人 */
 var TRADE_TAG = 'all';        /* 当前分类 */
+var TRADE_QF = 'all';         /* 第77单：品质筛选 all / fine / rare / epic（默认全部，默认序仍按类别） */
 var TRADE_TAB = 'cart';       /* 右栏标签：cart 购物车 / sell 卖出 */
 var TRADE_NOTE = '', TRADE_BAD = false;
 var TRADE_ICON = {};
@@ -13158,18 +13597,26 @@ function tradeLoad(){                     /* 读当日行情；跨天只重算�
   TRADE.stock = o.stock || {};
   TRADE.cart = o.cart || {};
   TRADE.hold = o.hold || {};
+  TRADE.q = o.q || {};                     /* 第77单：当日各 SKU 的品质（跨天随行情一起重掷） */
 }
 function tradeSave(){
   try{
     localStorage.setItem(TRADE_LS, JSON.stringify({ day: TRADE.day, prices: TRADE.prices,
-      stock: TRADE.stock, cart: TRADE.cart, hold: TRADE.hold }));
+      stock: TRADE.stock, cart: TRADE.cart, hold: TRADE.hold, q: TRADE.q || {} }));
   }catch(e){}
 }
 function tradeEnsure(id){                 /* 懒算当日价/库存：算过就锁住，当天不变 */
   var g = TRADE_GOODS[id];
   if(!g) return null;
   var day = tradeDayNum(TRADE.day);
-  if(TRADE.prices[id] == null) TRADE.prices[id] = trPriceOf(g, day);
+  if(!TRADE.q) TRADE.q = {};
+  if(TRADE.q[id] == null){
+    /* 第77单：进货按搜刮图权重掷品质（种子确定，同一天同批）；老档已锁的价也按 mul 一次性折算 */
+    TRADE.q[id] = qRollForId(id, true, function(){ return trRand(day, id, 'q'); });
+    if(TRADE.prices[id] != null) TRADE.prices[id] = qRound10(TRADE.prices[id] * QUALS[TRADE.q[id]].mul);
+    tradeSave();
+  }
+  if(TRADE.prices[id] == null) TRADE.prices[id] = qPriceOf(id, TRADE.q[id]);
   if(TRADE.stock[id] == null) TRADE.stock[id] = trStockOf(g, day);
   return g;
 }
@@ -13180,10 +13627,10 @@ function tradeSetMoney(v){
   storySave(p);
   return p.money;
 }
-function tradeSellUnit(id, durOpt){       /* 卖出单价：60%（黑市 50%）× 耐久比；durOpt 给仓库格子用 */
+function tradeSellUnit(id, durOpt, qvOpt){ /* 卖出单价：60%（黑市 50%）× 耐久比；价 = round10(基础 × 品质 mul) */
   var g = TRADE_GOODS[id];
   if(!g) return 0;
-  var p = TRADE.prices[id] != null ? TRADE.prices[id] : trPriceOf(g, tradeDayNum(TRADE.day));
+  var p = qPriceOf(id, qvOpt);            /* 第77单：卖出价同品质比例（不传 q 按 0 普通） */
   var rate = g.merch === 'black' ? 0.50 : 0.60;
   var dur = (typeof durOpt === 'number' && isFinite(durOpt)) ? durOpt :
     (TRADE.hold[id] && typeof TRADE.hold[id].d === 'number' ? TRADE.hold[id].d : 1);
@@ -13242,7 +13689,7 @@ function tradeConfirm(){                  /* 付款：按「实际能发的货�
     var gg = TRADE_GOODS[id];
     var units = q;
     if(gg && gg.cal) units = q * ammoUnitRounds(gg);      /* 第37单：一盒 = per 发（散装进仓库） */
-    var put = stashAddUnits((gg && gg.looseId) || id, units, 1, true);
+    var put = stashAddUnits((gg && gg.looseId) || id, units, 1, true, TRADE.q[id] || 0);   /* 第77单：买进的货带当日 SKU 品质 */
     if(!put.ok) full = true;
   }
   if(full){
@@ -13380,6 +13827,48 @@ function tradeIconURL(id){
         x.beginPath(); x.arc(21, 17, 1.8, 0, 6.283); x.stroke();
       }
     }
+  } else if(g.cat === 'valuable'){                 /* 第78单：贵重图标 —— 金条 / 硬盘 / 显卡 / 怀表 */
+    if(id === 'g:gold'){
+      px(10, 14, 14, 7, '#c9a24e'); px(10, 12.5, 14, 2, '#e6c878');
+      px(24, 17, 14, 7, '#b8903e'); px(24, 15.5, 14, 2, '#d8b86a');
+      px(17, 20, 14, 6, '#c9a24e'); px(17, 18.6, 14, 2, '#e6c878');
+    } else if(id === 'g:hdd'){
+      px(12, 9, 24, 14, '#3a4750'); px(12, 9, 24, 3, '#54646e');
+      px(15, 14, 12, 2.4, '#8fa6b6'); px(15, 18, 8, 2, '#5d6f7a');
+      px(30, 17, 4, 4, '#c9a24e');
+    } else if(id === 'g:gpu'){
+      px(9, 10, 30, 13, '#2e4a3c'); px(9, 10, 30, 2.5, '#41604f');
+      px(13, 14, 7, 6, '#1f352a'); px(23, 14, 7, 6, '#1f352a');
+      px(12, 24, 4, 3, '#c9a24e'); px(22, 24, 4, 3, '#c9a24e'); px(32, 24, 4, 3, '#c9a24e');
+    } else {
+      x.strokeStyle = '#c9a24e'; x.lineWidth = 2.2;
+      x.beginPath(); x.arc(24, 15, 9, 0, 6.283); x.stroke();
+      x.beginPath(); x.moveTo(24, 15); x.lineTo(24, 9); x.moveTo(24, 15); x.lineTo(28.5, 17); x.stroke();
+      px(21, 3, 6, 3, '#8fa6b6');
+    }
+  } else if(g.cat === 'junk'){                     /* 第78单：杂物/食品图标 */
+    if(id === 'j:screw'){
+      x.strokeStyle = '#9fb2c0'; x.lineWidth = 2.4;
+      x.beginPath(); x.moveTo(14, 21); x.lineTo(30, 9); x.moveTo(20, 24); x.lineTo(34, 14); x.stroke();
+      x.fillStyle = '#7d8f9c';
+      x.beginPath(); x.moveTo(12, 19); x.lineTo(16, 25); x.lineTo(9, 26); x.closePath(); x.fill();
+      x.beginPath(); x.moveTo(18, 22); x.lineTo(22, 28); x.lineTo(15, 29); x.closePath(); x.fill();
+    } else if(id === 'j:batt'){
+      px(16, 8, 16, 18, '#3f4b56'); px(16, 8, 16, 3, '#5d6f7a'); px(21, 5, 6, 3, '#8fa6b6');
+      px(19, 13, 4, 8, '#c9a24e'); px(25, 13, 4, 8, '#c9a24e');
+    } else if(id === 'j:tape'){
+      x.fillStyle = '#5d6f7a'; x.beginPath(); x.arc(24, 15, 9, 0, 6.283); x.fill();
+      x.fillStyle = '#2a333a'; x.beginPath(); x.arc(24, 15, 3.6, 0, 6.283); x.fill();
+      x.fillStyle = '#8fa6b6'; x.fillRect(30, 15, 10, 4);
+    } else if(id === 'f:water'){
+      px(20, 6, 8, 4, '#7fb2d8');
+      x.fillStyle = '#4f86ad'; x.beginPath();
+      x.moveTo(20, 10); x.lineTo(28, 10); x.lineTo(30, 22); x.lineTo(18, 22); x.closePath(); x.fill();
+      px(19, 15, 10, 3, '#d8ecf6');
+    } else {
+      px(15, 9, 18, 16, '#a8b490'); px(15, 9, 18, 3.5, '#c3cdaa'); px(15, 20, 18, 2.4, '#8a9474');
+      x.fillStyle = '#e8ecdd'; x.font = 'bold 8px system-ui'; x.fillText('MRE', 18, 17.5);
+    }
   } else {
     px(11, 9, 26, 16, B); px(11, 9, 26, 2, L); px(22, 9, 4, 16, S);    /* 货箱 */
     x.strokeStyle = '#6b7d8a'; x.lineWidth = 1.2;
@@ -13408,6 +13897,11 @@ function renderTrade(){
   var tagHtml = TRADE_TAGS.map(function(t){
     return '<div class="trtag' + (t[0] === tag ? ' on' : '') + '" data-tr-tag="' + t[0] + '">' + t[1] + '</div>';
   }).join('');
+  /* 第77单：品质筛选按钮组 —— 只过滤，默认「全部」，默认排序仍按类别（不许把贵的排最前） */
+  var qfHtml = '<div class="trtags" style="margin-bottom:8px">' +
+    [['all','全部'],['fine','优良↑'],['rare','稀有↑'],['epic','史诗↑']].map(function(t){
+      return '<div class="trtag' + (TRADE_QF === t[0] ? ' on' : '') + '" data-tr-qf="' + t[0] + '">' + t[1] + '</div>';
+    }).join('') + '</div>';
   /* 中栏货架 */
   var rows = '';
   for(i = 0; i < TRADE_ORDER.length; i++){
@@ -13415,10 +13909,12 @@ function renderTrade(){
     if(g.merch !== sel || (tag !== 'all' && g.cat !== tag)) continue;
     tradeEnsure(id);
     var st = TRADE.stock[id] || 0, inc = TRADE.cart[id] || 0;
+    var qv = TRADE.q[id] || 0;   /* 第77单：本 SKU 当日品质 */
+    if(TRADE_QF !== 'all' && qv < (TRADE_QF === 'fine' ? 1 : TRADE_QF === 'rare' ? 2 : 3)) continue;
     if(g.spc && st <= 0) continue;      /* 第42单：黑市没选中的特异弹当天整行不显示 */
     rows += '<div class="trrow">' +
       '<img class="trpic' + (g.gun ? ' g' : '') + '" src="' + tradeIconURL(id) + '" alt="">' +
-      '<div class="trnm"><b>' + g.name + '</b><s>' + g.sub +
+      '<div class="trnm"><b style="color:' + qColorNum(qv) + '">' + qTagHTML(qv) + g.name + '</b><s>' + g.sub +
         ' · 库存 <em class="' + (st ? '' : 'no') + '">' + st + '</em>' +
         (inc ? ' · 车里 <em>' + inc + '</em>' : '') + '</s></div>' +
       '<div class="trpr">₡' + trFmt(TRADE.prices[id]) + '<i>' + (sel === 'black' ? '黑市价' : '单价') + '</i></div>' +
@@ -13450,28 +13946,28 @@ function renderTrade(){
         '<button data-tr-sell="1" data-id="' + k + '">卖 1</button>' +
         '<button data-tr-sell="all" data-id="' + k + '">全卖</button></div></div>';
   }).join('') : '';
-  /* 第34单：卖出优先列仓库（按 id+耐久 归堆），旧「临时持有物」排在后面 */
+  /* 第34单：卖出优先列仓库（按 id+耐久+品质 归堆），旧「临时持有物」排在后面 */
   var stMap = {}, stOrder = [], stTotal = 0;
   for(i = 0; i < STASH.items.length; i++){
     var sit = STASH.items[i];
     var sdk = Math.round((sit.dur == null ? 1 : sit.dur) * 100) / 100;
-    var skey = sit.id + '|' + sdk;
-    if(!stMap[skey]){ stMap[skey] = { id: sit.id, dur: sdk, q: 0 }; stOrder.push(skey); }
+    var skey = sit.id + '|' + sdk + '|' + (sit.q || 0);   /* 第77单：不同品质分开列 */
+    if(!stMap[skey]){ stMap[skey] = { id: sit.id, dur: sdk, qv: sit.q || 0, q: 0 }; stOrder.push(skey); }
     stMap[skey].q += (sit.qty || 1);
   }
   var stHtml = stOrder.map(function(k){
-    var s = stMap[k], sg = TRADE_GOODS[s.id], su = stashUnitSell(s.id, s.dur);
+    var s = stMap[k], sg = TRADE_GOODS[s.id], su = stashUnitSell(s.id, s.dur, s.qv);
     stTotal += su * s.q;
     return '<div class="trsell">' +
       '<div class="h">' +
         '<img class="trpic' + (sg && sg.gun ? ' g' : '') + '" style="width:38px;height:22px" src="' + tradeIconURL(s.id) + '" alt="">' +
-        '<span class="n">' + (sg ? sg.name : s.id) + '</span>' +
+        '<span class="n" style="color:' + qColorNum(s.qv) + '">' + qTagHTML(s.qv) + (sg ? sg.name : s.id) + '</span>' +
         '<span class="pend">×' + s.q + '</span></div>' +
       '<div class="b"><span class="u">₡' + trFmt(su) + ' / ' +
         (sg && sg.cat === 'ammo' && sg.cal ? '发' : '件') +
         (s.dur < 1 ? ' · 耐久 ' + Math.round(s.dur * 100) + '%' : '') + '</span>' +
-        '<button data-st-sell="1" data-id="' + s.id + '" data-dur="' + s.dur + '">卖 1</button>' +
-        '<button data-st-sell="all" data-id="' + s.id + '" data-dur="' + s.dur + '">全卖</button></div></div>';
+        '<button data-st-sell="1" data-id="' + s.id + '" data-dur="' + s.dur + '" data-q="' + s.qv + '">卖 1</button>' +
+        '<button data-st-sell="all" data-id="' + s.id + '" data-dur="' + s.dur + '" data-q="' + s.qv + '">全卖</button></div></div>';
   }).join('');
   var sellHtml = stHtml + holdHtml;
   if(!sellHtml) sellHtml = '<div class="trempty">仓库是空的<br>先在左边买点货</div>';
@@ -13502,7 +13998,7 @@ function renderTrade(){
       '<div class="trcol trleft"><div class="trcap">商 人</div>' + merchHtml +
         '<div class="trcap" style="margin-top:12px">分 类</div><div class="trtags">' + tagHtml + '</div></div>' +
       '<div class="trcol trmid">' +
-        '<div class="trnote' + (TRADE_BAD ? ' bad' : '') + '">' + TRADE_NOTE + '</div>' + rows + '</div>' +
+        '<div class="trnote' + (TRADE_BAD ? ' bad' : '') + '">' + TRADE_NOTE + '</div>' + qfHtml + rows + '</div>' +
       '<div class="trcol trright">' +
         '<div class="trtabs">' +
           '<div class="trtab' + (TRADE_TAB === 'cart' ? ' on' : '') + '" data-tr-tab="cart">购物车</div>' +
@@ -13522,18 +14018,19 @@ function tradeClick(e){
   var d = t.dataset || {};
   if(d.trMerch){ TRADE_SEL = d.trMerch; TRADE_TAG = 'all'; TRADE_NOTE = ''; TRADE_BAD = false; renderTrade(); return; }
   if(d.trTag){ TRADE_TAG = d.trTag; renderTrade(); return; }
+  if(d.trQf){ TRADE_QF = d.trQf; renderTrade(); return; }   /* 第77单：品质筛选 */
   if(d.trTab){ TRADE_TAB = d.trTab; renderTrade(); return; }
   if(d.trAdd){ tradeAdd(d.id, d.trAdd | 0); return; }
   if(d.trDel){ tradeDel(d.trDel); return; }
   if(d.trSell){ tradeSell(d.id, d.trSell); return; }
-  if(d.stSell){ stashSellFrom(d.id, +d.dur, d.stSell); renderTrade(); return; }   /* 第34单：卖仓库的货 */
+  if(d.stSell){ stashSellFrom(d.id, +d.dur, d.stSell, d.q ? +d.q : 0); renderTrade(); return; }   /* 第34单：卖仓库的货（第77单带品质） */
 }
 function openTrade(){
   if(S.phase === 'play') return;
   tradeOpen = true;
   tradeLoad();
   stashLoad();                    /* 第34单：卖出页要列仓库，先把仓库读进来 */
-  TRADE_NOTE = ''; TRADE_BAD = false; TRADE_TAB = 'cart';
+  TRADE_NOTE = ''; TRADE_BAD = false; TRADE_TAB = 'cart'; TRADE_QF = 'all';   /* 第77单：品质筛选回默认「全部」 */
   document.getElementById('trade').style.display = 'block';
   tqPageSet('trade');                             /* 第51单：交易页唯一 active */
   renderTrade();
@@ -13570,9 +14067,10 @@ var STASH_CAL_KG = { pistol: 0.012, smg: 0.011, rifle: 0.016, shotgun: 0.050, sn
   /* 第37单六种口径（与 AMMO_CAL.kg 同源，写在这里免得跨表读） */
   '9mm': 0.012, '45': 0.014, '556': 0.013, '762': 0.016, '12ga': 0.050, '338': 0.050 };
 
-function stashBaseWH(id){                  /* 派单占格表（未旋转） */
+function stashBaseWH(id){                  /* 派单占格表（未旋转）；第78单：货自带 wh 就用货的 */
   var g = TRADE_GOODS[id];
   if(!g) return [1, 1];
+  if(g.wh) return g.wh.slice();
   if(g.gun){
     var cat = WEAPONS[g.gun] ? WEAPONS[g.gun].cat : 'rifle';
     if(cat === 'smg' || cat === 'shotgun') return [2, 1];
@@ -13587,9 +14085,9 @@ function stashWH(it){
   var b = stashBaseWH(it.id);
   return it.rot ? [b[1], b[0]] : [b[0], b[1]];
 }
-function stashStackable(id){               /* 弹药 / 医疗 / 投掷物才有 qty */
+function stashStackable(id){               /* 弹药 / 医疗 / 投掷物 / 杂物(第78单 含食品)才有 qty */
   var g = TRADE_GOODS[id];
-  return !!(g && (g.cat === 'ammo' || g.cat === 'med' || g.nade));
+  return !!(g && (g.cat === 'ammo' || g.cat === 'med' || g.nade || g.cat === 'junk'));
 }
 function stashName(it){                  /* 弹药去掉货名里的「×30」，数量单列在信息卡 */
   var g = TRADE_GOODS[it.id];
@@ -13601,6 +14099,8 @@ function stashCatName(it){
   var g = TRADE_GOODS[it.id];
   if(!g) return '未知';
   if(g.gun){ var w = WEAPONS[g.gun]; return w ? w.cls : '枪械'; }
+  if(g.cat === 'valuable') return '贵重';                       /* 第78单：六类物资 */
+  if(g.cat === 'junk') return g.kind === 'food' ? '食品' : '杂物';
   if(g.nade) return '投掷物';
   if(g.cat === 'armor') return '护甲';
   if(g.cat === 'med') return '医疗';
@@ -13614,6 +14114,8 @@ function stashUnitKg(it){
   var g = TRADE_GOODS[it.id];
   if(!g) return 0.2;
   if(g.gun){ var w = WEAPONS[g.gun]; return w ? w.wt : 3; }
+  if(g.cat === 'valuable') return g.id === 'g:gold' ? 8 : (g.id === 'g:gpu' ? 1.2 : 0.5);   /* 第78单：金条压手 */
+  if(g.cat === 'junk') return g.kind === 'food' ? 0.4 : 0.3;
   if(g.nade) return 0.42;
   if(g.cat === 'armor') return 8.5;
   if(g.cat === 'med') return STASH_MED_KG[g.kind] || 0.35;
@@ -13690,7 +14192,8 @@ function stashLoad(){
       var q = Math.max(1, Math.round(+s.qty || 1));
       if(stashStackable(lid)){ if(q > stackMaxOf(lid)) q = stackMaxOf(lid); } else q = 1;
       var cand = { uid: 0, id: lid, x: x, y: y, rot: s.rot ? 1 : 0, qty: q,
-        dur: typeof s.dur === 'number' ? s.dur : 1 };
+        dur: typeof s.dur === 'number' ? s.dur : 1,
+        q: (typeof s.q === 'number' && s.q >= 0 && s.q <= 5) ? (s.q|0) : 0 };   /* 第77单：缺 q 一律补 0（普通） */
       var rd = magRoundsLoad(s, lid); if(rd) cand.rounds = rd;   /* 第37单：满匣带 rounds */
       var wh = stashWH(cand), bad = false;
       if(x < 0 || y < 0 || x + wh[0] > cols || y + wh[1] > rows) continue;
@@ -13715,7 +14218,7 @@ function stashSave(){
     localStorage.setItem(STASH_LS, JSON.stringify({ cols: STASH.cols, rows: STASH.rows,
       items: STASH.items.map(function(it){
         var o = { uid: it.uid, id: it.id, x: it.x, y: it.y, rot: it.rot ? 1 : 0,
-          qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur };
+          qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur, q: it.q || 0 };
         var r = magRoundsSave(it); if(r) o.rounds = r;      /* 第37单：满匣带 rounds */
         return o;
       }) }));
@@ -13729,16 +14232,18 @@ function stashConsume(it, n){
   it.qty = (it.qty || 1) - (n || 1);
   if(it.qty <= 0) stashRemoveItem(it); else stashSel = it.uid;
 }
-/* 入库：同 id 同耐久先补满已有堆（≤60），剩的按左上→右下找位置；任何一步放不下 → 整次回滚 */
-function stashAddUnits(id, qty, dur, noSave){
+/* 入库：同 id 同耐久同品质先补满已有堆（≤60），剩的按左上→右下找位置；任何一步放不下 → 整次回滚 */
+function stashAddUnits(id, qty, dur, noSave, qv){
   var g = TRADE_GOODS[id];
   if(!g || qty <= 0) return { ok: false, why: 'bad' };
+  var qn = (typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0;   /* 第77单：品质 0–5 */
   var d = Math.round((typeof dur === 'number' ? dur : 1) * 100) / 100;
   var snap = JSON.stringify(STASH.items), i, it;
   if(stashStackable(id)){
     for(i = 0; i < STASH.items.length && qty > 0; i++){
       it = STASH.items[i];
       if(it.id !== id) continue;
+      if((it.q || 0) !== qn) continue;                 /* 不同品质不混堆 */
       if(Math.round((it.dur == null ? 1 : it.dur) * 100) / 100 !== d) continue;
       var room = stackMaxOf(id) - (it.qty || 1);
       if(room <= 0) continue;
@@ -13747,7 +14252,7 @@ function stashAddUnits(id, qty, dur, noSave){
     }
     while(qty > 0){
       var chunk = Math.min(stackMaxOf(id), qty);
-      var ni = { uid: stashNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d };
+      var ni = { uid: stashNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d, q: qn };
       var sp = stashFindSpot(ni);
       if(!sp){ STASH.items = JSON.parse(snap); return { ok: false, why: 'full' }; }
       ni.x = sp.x; ni.y = sp.y; ni.rot = sp.rot;
@@ -13755,7 +14260,7 @@ function stashAddUnits(id, qty, dur, noSave){
     }
   } else {
     while(qty > 0){
-      var ni2 = { uid: stashNextUid(), id: id, x: 0, y: 0, rot: 0, qty: 1, dur: d };
+      var ni2 = { uid: stashNextUid(), id: id, x: 0, y: 0, rot: 0, qty: 1, dur: d, q: qn };
       var sp2 = stashFindSpot(ni2);
       if(!sp2){ STASH.items = JSON.parse(snap); return { ok: false, why: 'full' }; }
       ni2.x = sp2.x; ni2.y = sp2.y; ni2.rot = sp2.rot;
@@ -13772,17 +14277,17 @@ function stashPrice(id){
   if(TRADE.prices[id] == null){ tradeEnsure(id); tradeSave(); }
   return TRADE.prices[id] != null ? TRADE.prices[id] : g.base;
 }
-function stashUnitSell(id, dur){           /* 一件/一盒 的卖出价（60% · 黑市 50% · 按耐久） */
-  var g = TRADE_GOODS[id], u = tradeSellUnit(id, dur);
+function stashUnitSell(id, dur, qv){      /* 一件/一盒 的卖出价（60% · 黑市 50% · 按耐久 · 按品质） */
+  var g = TRADE_GOODS[id], u = tradeSellUnit(id, dur, qv);
   if(g && g.cat === 'ammo' && g.cal)
     return Math.max(1, Math.round(u / ammoUnitRounds(g)));
   return u;                                /* 弹药按「发」卖，其余按件 */
 }
-function stashSellValue(it){ return stashUnitSell(it.id, it.dur) * (it.qty || 1); }
-function stashValue(it){                   /* 信息卡「价值 ₡」= 当日价 × 数量（枪按耐久折） */
+function stashSellValue(it){ return stashUnitSell(it.id, it.dur, it.q || 0) * (it.qty || 1); }
+function stashValue(it){                   /* 信息卡「价值 ₡」= 当日价 × 品质 mul × 数量（枪按耐久折） */
   var g = TRADE_GOODS[it.id];
   if(!g) return 0;
-  var p = stashPrice(it.id), q = it.qty || 1;
+  var p = qPriceOf(it.id, it.q || 0), q = it.qty || 1;
   if(g.cat === 'ammo' && g.cal)
     return Math.max(1, Math.round(p * q / ammoUnitRounds(g)));
   if(stashStackable(it.id)) return p * q;
@@ -13825,7 +14330,7 @@ function stashEquip(it){
   renderStash();
 }
 function stashRepair(it){
-  var mx = durMaxOf(it.id);
+  var mx = durMaxOf(it.id, it);            /* 第77单：带品质的耐久上限 */
   if(!mx) return;
   var cost = repairCost(it);
   if(cost <= 0){ stashNote = '已经满耐久，不用修'; stashNoteBad = true; renderStash(); return; }
@@ -13866,7 +14371,7 @@ function stashUse(it){
 function stashDismantle(it){
   var g = TRADE_GOODS[it.id];
   if(!g || !g.gun){ stashNote = '只有枪械能拆解'; stashNoteBad = true; renderStash(); return; }
-  var back = Math.max(10, Math.round(stashPrice(it.id) * 0.30 / 10) * 10);
+  var back = Math.max(10, Math.round(qPriceOf(it.id, it.q || 0) * 0.30 / 10) * 10);   /* 第77单：按品质折价 */
   stashRemoveItem(it);
   tradeSetMoney(tradeMoney() + back);
   stashNote = '拆解 ' + g.name + ' · 回收 ₡' + trFmt(back) + '（30%）'; stashNoteBad = false;
@@ -13891,14 +14396,16 @@ function stashDiscard(it){
   stashNote = '已丢弃 ' + (g ? g.name : it.id); stashNoteBad = false;
   stashSave(); renderStash();
 }
-/* 交易页「卖 1 / 全卖」从仓库扣：n = 1 | 'all' */
-function stashSellFrom(id, dur, n){
+/* 交易页「卖 1 / 全卖」从仓库扣：n = 1 | 'all'；第77单起按品质分组扣货、按品质计价 */
+function stashSellFrom(id, dur, n, qv){
   var d = Math.round((typeof dur === 'number' ? dur : 1) * 100) / 100;
-  var unit = stashUnitSell(id, d), want = n === 'all' ? 1e9 : Math.max(1, n | 0);
+  var qn = (typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0;
+  var unit = stashUnitSell(id, d, qn), want = n === 'all' ? 1e9 : Math.max(1, n | 0);
   var gain = 0, sold = 0, i;
   for(i = STASH.items.length - 1; i >= 0 && want > 0; i--){
     var it = STASH.items[i];
     if(it.id !== id) continue;
+    if((it.q || 0) !== qn) continue;                 /* 不同品质不混卖 */
     if(Math.round((it.dur == null ? 1 : it.dur) * 100) / 100 !== d) continue;
     var q = Math.min(it.qty || 1, want);
     gain += unit * q; sold += q; want -= q;
@@ -13988,8 +14495,90 @@ function stashDragUpdate(tx, ty){
   pre.style.height = (wh[1] * STASH_CELL) + 'px';
   pre.className = 'stpre' + (stashDrag.ok ? '' : ' bad');
 }
+/* ---------- 第79单 配件 ↔ 枪（把枪当容器）：拖配件到枪上装配 / 拖下来回仓库 ---------- */
+function stashGunAt(cx, cy){                       /* (格坐标) 命中的仓库枪（非近战） */
+  for(var i = 0; i < STASH.items.length; i++){
+    var x = STASH.items[i], g = TRADE_GOODS[x.id];
+    if(!g || !g.gun || !WEAPONS[g.gun] || WEAPONS[g.gun].cat === 'melee') continue;
+    var wh = stashWH(x);
+    if(cx >= x.x && cx < x.x + wh[0] && cy >= x.y && cy < x.y + wh[1]) return x;
+  }
+  return null;
+}
+function stashModToGun(){                          /* 拖的是配件且落点在枪上 → 装配；否则 false 走正常落格 */
+  if(!stashDrag) return false;
+  var d = stashDrag, it = d.item, g = TRADE_GOODS[it.id];
+  if(!g || g.cat !== 'mod' || !g.mid) return false;
+  if(d.tx < 0 || d.ty < 0 || d.tx >= STASH.cols || d.ty >= STASH.rows) return false;
+  var gun = stashGunAt(d.tx, d.ty);
+  if(!gun) return false;
+  var gid = gun.id, slot = g.slot, mid = g.mid;
+  if(!WEAPONS[gid] || WEAPONS[gid].cat === 'melee') return false;
+  normMods(loadout[gid] || (loadout[gid] = {}));
+  if(loadout[gid][slot] === mid){
+    stashNote = WEAPONS[gid].name + ' 已装着 ' + g.name; stashNoteBad = true;
+  } else {
+    var old = loadout[gid][slot];
+    if(old !== 'none' && old !== 'bstd' && attDef(slot, old).p > 0 && !gsStashCanTake(old)){
+      stashNote = '仓库放不下卸下的 ' + attDef(slot, old).n + ' · 未装配'; stashNoteBad = true;
+    } else {
+      if(old !== 'none' && old !== 'bstd' && attDef(slot, old).p > 0)
+        stashAddUnits('m:' + old, 1, 1, false);    /* 枪上旧付费件回仓库（守恒） */
+      stashConsume(it, 1);                          /* 拖的配件扣 1 件 */
+      loadout[gid][slot] = mid;
+      stashSave();                                  /* 第79单：消耗落盘，防 stashLoad 读回 */
+      loadoutSave();
+      stashNote = g.name + ' → ' + WEAPONS[gid].name + '（' + MOD_CATS[slot] + '）'; stashNoteBad = false;
+    }
+  }
+  stashEndDrag();
+  renderStash();
+  return true;
+}
+function stashUnmod(uid, slot){                    /* 枪上卸件 → 配件回仓库 */
+  var it = stashById(uid);
+  if(!it) return;
+  var g = TRADE_GOODS[it.id];
+  if(!g || !g.gun || !WEAPONS[g.gun] || WEAPONS[g.gun].cat === 'melee') return;
+  normMods(loadout[it.id] || (loadout[it.id] = {}));
+  var mid = loadout[it.id][slot];
+  if(mid === MOD_DEF[slot]){ stashNote = MOD_CATS[slot] + ' 槽没装付费配件'; stashNoteBad = true; renderStash(); return; }
+  if(!gsStashCanTake(mid)){ stashNote = '仓库放不下 · 没卸'; stashNoteBad = true; renderStash(); return; }
+  loadout[it.id][slot] = MOD_DEF[slot];
+  stashAddUnits('m:' + mid, 1, 1, false);
+  loadoutSave();
+  stashNote = attDef(slot, mid).n + ' 已卸下 → 仓库'; stashNoteBad = false;
+  renderStash();
+}
+var stashUnmodDrag = null;                          /* 第79单：从枪上拖配件下来的轻量拖拽 */
+function stashUnmodStart(e, uid, slot){
+  stashUnmodDrag = { uid: uid, slot: slot };
+  var gh = stashGhostEl();
+  gh.style.width = '30px'; gh.style.height = '30px';
+  gh.innerHTML = '<div style="width:30px;height:30px;background:#1b3446;border:1px solid #4d7f99;color:#cfe3f2;font-size:9px;line-height:30px;text-align:center">卸</div>';
+  gh.style.display = 'block';
+  stashDrag = null;                                 /* 别让枪本体拖拽抢ghost位置 */
+  stashGhostPos(e.clientX, e.clientY);
+  e.preventDefault();
+  e.stopPropagation();
+}
+function stashUnmodDrop(e){
+  if(!stashUnmodDrag) return;
+  var d = stashUnmodDrag;
+  stashUnmodDrag = null;
+  var gh = stashGhostEl();
+  if(gh) gh.style.display = 'none';
+  var g = document.getElementById('stGrid'), inGrid = false;
+  if(g && e){
+    var r = g.getBoundingClientRect();
+    inGrid = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  }
+  if(inGrid) stashUnmod(d.uid, d.slot);             /* 点击小点 = 原地松手也在格网内 → 直接卸下 */
+  else renderStash();
+}
 function stashDrop(){
   if(!stashDrag) return false;
+  if(stashModToGun()) return true;                  /* 第79单：配件拖到枪上 → 装配，不走落格（键盘拖拽同样生效） */
   var d = stashDrag, it = d.item;
   var ok = d.ok && stashFits(it, d.tx, d.ty, it.uid);
   if(ok){ it.x = d.tx; it.y = d.ty; stashNote = ''; stashNoteBad = false; stashSave(); }
@@ -14082,7 +14671,7 @@ function stashContext(e){
   stashSel = it.uid;
   var g = TRADE_GOODS[it.id] || {};
   var canEquip = !!(g.gun || g.cat === 'armor'), canUse = !!(g.cat === 'med' || g.nade);
-  var canRepair41 = !!(durMaxOf(it.id) && (it.dur == null || it.dur < 1) && tradeMoney() >= repairCost(it));
+  var canRepair41 = !!(durMaxOf(it.id, it) && (it.dur == null || it.dur < 1) && tradeMoney() >= repairCost(it));
   var acts = [['equip', '装 备', canEquip], ['use', '使 用', canUse],
     ['fill', '装填弹药', magIsEmptyId(it.id)], ['repair', '维 修 · ₡' + trFmt(repairCost(it)), canRepair41],
     ['dismantle', '拆 解', !!g.gun],
@@ -14105,9 +14694,23 @@ function stashContext(e){
   m.style.top = Math.max(4, Math.min(window.innerHeight - h - 6, e.clientY)) + 'px';
   renderStash();
 }
+function stashGunModRows(it){                      /* 第79单：选中枪 → 已装配件六行，付费件带「卸下」按钮 */
+  normMods(loadout[it.id] || (loadout[it.id] = {}));
+  var rows = '', i;
+  for(i = 0; i < MOD_ORDER.length; i++){
+    var s = MOD_ORDER[i], mid = loadout[it.id][s];
+    rows += '<div class="strow"><span>' + MOD_CATS[s] + '</span><b>' + attDef(s, mid).n +
+      (mid === MOD_DEF[s] ? '' :
+        ' <button data-st-btn="unmod:' + s + '" style="margin-left:6px;font-size:10px;padding:1px 7px">卸下</button>') +
+      '</b></div>';
+  }
+  return '<div style="font-size:10px;color:#5f7d90;margin:8px 0 2px">已装配件 · 仓库配件可拖到枪上装 · 点金点卸下</div>' + rows;
+}
 function stashAction(act){
+  if(act === 'go'){ stashLaunch(); return; }   /* 第74F单：仓库底部「出发」—— 不需要选中物品 */
   var it = stashById(stashSel);
   if(!it) return;
+  if(act.indexOf('unmod:') === 0){ stashUnmod(stashSel, act.slice(6)); return; }   /* 第79单：卸配件回仓库 */
   if(act === 'equip') stashEquip(it);
   else if(act === 'use') stashUse(it);
   else if(act === 'fill'){ hideStashMenu(); ammoFillOpen(it.uid); }   /* 第37单：局外压弹面板 */
@@ -14117,8 +14720,56 @@ function stashAction(act){
   else if(act === 'topack') stashToPack(it);   /* 第35单：仓库 → 背包 */
   else if(act === 'repair') stashRepair(it);   /* 第41单：局外维修台 */
 }
+/* ---------- 第77单：仓库按品质排布（再点一次恢复默认） ----------
+   格网仓库没有「列表」可排：按品质从高到低（默认按 uid 入库先后）从左上往右下重摆。
+   摆不下时先试转 90°，再不行保持原位原朝向 —— 原布局本身合法，绝不吞件。 */
+var STASH_QSORT = false;
+function stashRelayout(order){
+  var snap = JSON.stringify(STASH.items), placed = [], i, k, it, wh, ok, x, y, j, o, ow;
+  for(i = 0; i < order.length; i++){
+    it = order[i];
+    var rots = [it.rot ? 1 : 0, it.rot ? 0 : 1], done = false;
+    for(k = 0; k < 2 && !done; k++){
+      it.rot = rots[k]; wh = stashWH(it);
+      for(y = 0; y + wh[1] <= STASH.rows && !done; y++) for(x = 0; x + wh[0] <= STASH.cols; x++){
+        ok = true;
+        for(j = 0; j < placed.length; j++){
+          o = placed[j]; ow = stashWH(o);
+          if(x < o.x + ow[0] && o.x < x + wh[0] && y < o.y + ow[1] && o.y < y + wh[1]){ ok = false; break; }
+        }
+        if(ok){ it.x = x; it.y = y; placed.push(it); done = true; break; }
+      }
+    }
+    if(!done){
+      /* 极端碎片化摆不下：整次重排作废，恢复原布局 —— 重排永不吞件（与第34单整单回滚同口径） */
+      STASH.items = JSON.parse(snap);
+      return false;
+    }
+  }
+  STASH.items = placed;
+  return true;
+}
+function stashQSortToggle(){
+  STASH_QSORT = !STASH_QSORT;
+  var order = STASH.items.slice();
+  if(STASH_QSORT) order.sort(function(a, b){ return (b.q || 0) - (a.q || 0); });   /* 品质高的在前（稳定排序） */
+  else order.sort(function(a, b){ return a.uid - b.uid; });                        /* 恢复默认：按入库先后 */
+  var done = stashRelayout(order);
+  if(!done) STASH_QSORT = !STASH_QSORT;      /* 没排成：按钮状态也回退 */
+  stashSave();
+  stashNote = !done ? '排不下 · 保持原布局'
+    : (STASH_QSORT ? '已按品质排布（高在前 · 左上优先）' : '已恢复默认排布（按入库先后）');
+  stashNoteBad = !done;
+  renderStash();
+}
 function stashMouseDown(e){
   if(e.button !== 0) return;
+  /* 第79单：枪上的配件小点 —— 点击或拖出 = 卸下回仓库 */
+  var ug = e.target.getAttribute ? e.target.getAttribute('data-ungun') : null;
+  if(ug){
+    var pel = e.target.closest ? e.target.closest('.sti') : null;
+    if(pel){ stashUnmodStart(e, +pel.getAttribute('data-uid'), ug); return; }
+  }
   hideStashMenu();
   var t = e.target;
   /* 第36单：胸挂里的格子用同一套拖拽引擎（.rigi 只是换了个格网） */
@@ -14153,6 +14804,7 @@ function stashMouseMove(e){
 }
 function stashDocMove(e){
   if(!tqPageIs('stash')) return;                  /* 第51单：仓库页不 active 时，document 上的拖拽监听一律不响应 */
+  if(stashUnmodDrag){ stashGhostPos(e.clientX, e.clientY); return; }   /* 第79单：卸件拖拽 ghost 跟手 */
   if(!stashDrag || stashDrag.kb) return;
   stashDrag.cx = e.clientX; stashDrag.cy = e.clientY;
   stashGhostPos(e.clientX, e.clientY);
@@ -14185,6 +14837,7 @@ function stashDocMove(e){
 }
 function stashDocUp(e){
   if(!tqPageIs('stash')) return;
+  if(stashUnmodDrag){ stashUnmodDrop(e); return; }   /* 第79单：从枪上拖配件下来 */
   if(!stashDrag || stashDrag.kb) return;
   if(stashDrag.to === 'rig'){ rigTakeFromStash(); return; }   /* 第36单：仓库 → 胸挂 */
   stashDrop();
@@ -14214,38 +14867,56 @@ function renderStash(){
   for(i = 0; i < STASH.items.length; i++){
     it = STASH.items[i]; wh = stashWH(it); g = TRADE_GOODS[it.id];
     var dragging = !!(stashDrag && stashDrag.uid === it.uid);
+    /* 第79单：枪上已装配件画成金点（点击或拖出 = 卸下回仓库）；拖动这把枪时先不画，别挡拖拽 */
+    var gunMods = '';
+    if(g && g.gun && WEAPONS[g.gun] && WEAPONS[g.gun].cat !== 'melee' && !dragging){
+      var ldg = normMods(loadout[g.gun] || (loadout[g.gun] = {})), mi = 0;
+      for(var ms = 0; ms < MOD_ORDER.length; ms++){
+        var midg = ldg[MOD_ORDER[ms]];
+        if(midg === 'none' || midg === 'bstd') continue;
+        gunMods += '<i data-ungun="' + MOD_ORDER[ms] + '" title="' + MOD_CATS[MOD_ORDER[ms]] + '·' +
+          attDef(MOD_ORDER[ms], midg).n + '（点击或拖到空处卸下）" style="position:absolute;left:' + (3 + mi * 11) +
+          'px;bottom:2px;width:9px;height:9px;border-radius:50%;background:#d8b46a;border:1px solid #08121a;cursor:grab;z-index:2"></i>';
+        if(++mi >= 6) break;
+      }
+    }
     items += '<div class="sti' + (stashSel === it.uid ? ' sel' : '') +
       (dragging ? ' drag' : '') + '" data-uid="' + it.uid + '"' +
       ' title="' + stashName(it) + ' · ' + wh[0] + '×' + wh[1] + '"' +
       ' style="left:' + (it.x * STASH_CELL) + 'px;top:' + (it.y * STASH_CELL) + 'px;width:' +
-      (wh[0] * STASH_CELL) + 'px;height:' + (wh[1] * STASH_CELL) + 'px">' +
+      (wh[0] * STASH_CELL) + 'px;height:' + (wh[1] * STASH_CELL) + 'px;box-shadow:inset 3px 0 0 ' + qColorOf(it) +
+      (stashSel === it.uid ? ',inset 0 0 0 1px #4d7f99' : '') + '">' +
       '<img class="' + (g && g.gun ? 'g' : '') + '" src="' + tradeIconURL(it.id) + '" alt="">' +
-      (wh[0] * wh[1] >= 4 ? '<div class="nm">' + stashName(it) + '</div>' : '') +
+      (wh[0] * wh[1] >= 4 ? '<div class="nm" style="color:' + qColorOf(it) + '">' + qTagHTML(it.q) + stashName(it) + '</div>' : '') +
       ((it.qty || 1) > 1 ? '<div class="q">×' + it.qty + '</div>' : '') +
+      gunMods +
       '</div>';
   }
   var sel = stashById(stashSel);
   var info;
   if(sel){
     var swh = stashWH(sel), sg = TRADE_GOODS[sel.id] || {};
-    var canRepair = !!(durMaxOf(sel.id) && (sel.dur == null || sel.dur < 1));
+    var canRepair = !!(durMaxOf(sel.id, sel) && (sel.dur == null || sel.dur < 1));   /* 第77单：上限带品质 */
     var rc = canRepair ? repairCost(sel) : 0;
     var canPay = canRepair && money >= rc;
     /* 第41单：护甲行显示「耐久 78/120」；局外维修台按 (1-dur/max)×价×0.6 收费，钱不够置灰 */
-    var mx41 = durMaxOf(sel.id);
+    var mx41 = durMaxOf(sel.id, sel);
     var durTxt = (sg.gun || sg.cat === 'armor') ?
       Math.round((sel.dur == null ? 1 : sel.dur) * 100) + '%' : '—';
     if(mx41 && sel.id.indexOf('armor') >= 0) durTxt += ' · 耐久 ' +
       Math.round((sel.dur == null ? 1 : sel.dur) * mx41) + '/' + mx41;
     var val = stashValue(sel);
     info = '<div class="stcard">' +
-      '<div class="big">' + stashName(sel) + '</div>' +
+      '<div class="big">' + qTagHTML(sel.q) + stashName(sel) + '</div>' +
       '<div class="strow"><span>类别</span><b>' + stashCatName(sel) + '</b></div>' +
+      '<div class="strow"><span>品质</span><b style="color:' + qColorOf(sel) + '">' + qNameOf(sel) + '</b></div>' +
       '<div class="strow"><span>占格</span><b>' + swh[0] + '×' + swh[1] + '（' + (swh[0] * swh[1]) + ' 格）</b></div>' +
       '<div class="strow"><span>数量</span><b>' + (sel.qty || 1) +
         ((sg.cat === 'ammo' && sg.cal) ? ' 发' : '') + '</b></div>' +
       '<div class="strow"><span>耐久</span><b>' + durTxt + '</b></div>' +
       '<div class="strow"><span>价值</span><b class="money">₡' + trFmt(val) + '</b></div>' +
+      /* 第79单：枪当容器 —— 已装配件列表，付费件带「卸下」（回仓库） */
+      (sg.gun && WEAPONS[sg.gun] && WEAPONS[sg.gun].cat !== 'melee' ? stashGunModRows(sel) : '') +
       '<div class="stact">' +
         '<button data-st-btn="equip"' + (sg.gun || sg.cat === 'armor' || sg.cat === 'cont' ? '' : ' disabled') + '>装 备</button>' +
         '<button data-st-btn="use"' + (sg.cat === 'med' || sg.nade ? '' : ' disabled') + '>使 用</button>' +
@@ -14293,6 +14964,7 @@ function renderStash(){
               '<button id="stExt"' + (canExt ? '' : ' disabled') + '>' +
                 (maxed ? '列数已满 · ' + STASH_COL_MAX + ' 列' :
                   '扩展 +' + STASH_EXT_STEP + ' 列（₡' + STASH_EXT_P + '）') + '</button>' +
+              '<button id="stQSort">' + (STASH_QSORT ? '恢复默认排序' : '按品质') + '</button>' +
             '</div>' +
           '</div>' +
           /* 第36单：胸挂单独一栏（贴着仓库格网右边）—— 只装 1×1 小件，前 4 格 = 局内数字键 1–4 快取 */
@@ -14326,7 +14998,8 @@ function renderStash(){
           '方向键移光标 · Enter 拿起放下 · Esc 取消<br>' +
           '买入先进这里；放不下会提示「仓库已满」</div>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    stashGoBarHTML();                          /* 第74F单：底部常驻「装备栏 + 出发」横条 */
   box.onmousedown = stashMouseDown;
   box.onmousemove = stashMouseMove;
   box.onmouseleave = function(){
@@ -14350,12 +15023,15 @@ function renderStash(){
     var t = e.target;
     if(t.id === 'stClose'){ closeStash(); return; }
     if(t.id === 'stExt'){ stashExtend(); return; }
+    if(t.id === 'stQSort'){ stashQSortToggle(); return; }   /* 第77单：按品质排布 / 恢复默认 */
     var pu = t.getAttribute ? t.getAttribute('data-pk-uid') : null;
     if(pu){ packToStash(+pu); return; }          /* 第35单：点背包小格 → 取回仓库 */
     var b = t.getAttribute ? t.getAttribute('data-st-btn') : null;
     if(b){ stashAction(b); return; }
     var ce = t.getAttribute ? t.getAttribute('data-cont') : null;
     if(ce){ equipContainer(ce); return; }
+    var un = t.getAttribute ? t.getAttribute('data-unequip') : null;   /* 第74C单：卸下容器 */
+    if(un){ equipUnequip(un); return; }
   };
   stashBindDoc();
   packBindDoc();                                 /* 第36单：胸挂拖拽复用背包那套 document 监听 */
@@ -14384,6 +15060,48 @@ function closeStash(){
   renderMenu();
 }
 
+/* ==================== 第74F单 仓库页底部「装备栏 + 出发」 ====================
+   ld3 独立装备页不再是入口：简报「起装备」→ 直接进仓库并滚到本条。
+   「出发」不弹任何页面：带队友走 3 秒准备（renderPrep），否则直接 startGame；
+   剧情态（简报已 storyApplyEnv）同样 startGame + storyLaunched 记档 —— 不再用 gear.gun
+   覆盖 loadout：仓库装备已经写进 menuState.loadout。没容器不禁用（跑刀），只提示一次。 */
+function stashGoBarHTML(){
+  var L = menuState.loadout, pk = EQUIP.pack ? CONTAINERS[EQUIP.pack] : null,
+      rg = EQUIP.rig ? CONTAINERS[EQUIP.rig] : null, ak = armorKeyOfId(L.armor), i, w = packWeight();
+  for(i = 0; i < RIG.items.length; i++) w += stashUnitKg(RIG.items[i]);
+  return '<div id="stGoBar" style="position:sticky;bottom:6px;z-index:5;display:flex;align-items:center;gap:10px;' +
+    'margin-top:10px;padding:8px 12px;border:1px solid #2c4256;background:#0e1a26;border-radius:6px">' +
+    '<div style="flex:1;min-width:0;font-size:13px;color:#cfe0ee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">枪：' +
+    (WEAPONS[L.primary] ? WEAPONS[L.primary].name : '空手') +
+    ' · 甲：' + (ak && ARMOR[ak] ? ARMOR[ak].n : '无甲') +
+    ' · 背包：' + (pk ? pk.n : '无') +
+    ' · 胸挂：' + (rg ? rg.n : '无') +
+    ' · 格数 ' + (PACK_COLS * PACK_ROWS) + '+' + (RIG_COLS * RIG_ROWS) +
+    ' · 总重 ' + (Math.round(w * 10) / 10).toFixed(1) + ' kg</div>' +
+    (!pk && !rg ? '<span style="flex-shrink:0;font-size:11px;color:#ef9a9a">无容器 · 只能捡手上的</span>' : '') +
+    '<button data-st-btn="go" style="flex-shrink:0;width:120px;padding:8px 0;font-size:15px;letter-spacing:6px;' +
+      'cursor:pointer;color:#cfe0ee;background:#1d3042;border:1px solid #3a556c;border-radius:4px">出 发</button>' +
+    '</div>';
+}
+function stashLaunch(){
+  if(!EQUIP.pack && !EQUIP.rig){                 /* 出发前提示一次，不阻止出发（跑刀） */
+    stashNote = '没容器，只能拿在手上的东西'; stashNoteBad = false;
+  }
+  try{ localStorage.setItem(LD_LAST, JSON.stringify(LO())); }catch(err){}
+  stashOpen = false; stashEndDrag(); hideStashMenu();
+  var el = document.getElementById('stash');
+  if(el) el.style.display = 'none';              /* startGame 只藏 #screen，仓库覆盖层自己收 */
+  if(menuState.allies && menuState.mode !== 'dm'){ renderPrep(); return; }
+  startGame();
+  if(STORY.pending){ STORY.pending = false; storyLaunched(); }   /* 与 ld3 ldGo 同口径 */
+  if(!EQUIP.pack && !EQUIP.rig) note('没容器，只能拿在手上的东西');
+}
+function openStashGoBar(){                       /* 第74F单：简报「起装备」→ 仓库页并滚到底部出发条 */
+  openStash();
+  var bar = document.getElementById('stGoBar');
+  if(bar && bar.scrollIntoView) bar.scrollIntoView({ block: 'center' });
+}
+
 /* ==================== 第35单 局内背包（10×6 格 · 每格 40px） ====================
    秋 23:07 定的口径：
    · 按 Tab 开/关。**不算暂停**（S.phase 一直是 play），只锁开火/移动键与鼠标瞄准 —— 敌人照走。
@@ -14403,7 +15121,7 @@ var PACK = { cols: PACK_COLS, rows: PACK_ROWS, items: [], cell: PACK_CELL, kind:
 var packOpen = false, packSel = null, packDrag = null, packNote = '', packNoteBad = false;
 var PACK_CAST = null, PACK_DROPS = [], packDocBound = false, packCur = { x: 0, y: 0 };
 var PACK_ICON = {};
-var PACK_USE_SEC = { bandage: 3, kit: 4, surgery: 5, pain: 2, splint: 1.5, repair_kit: 2 };  /* 第52单：夹板 1.5s */
+var PACK_USE_SEC = { bandage: 3, kit: 4, surgery: 5, pain: 2, splint: 1.5, repair_kit: 2, food: 2 };  /* 第52单：夹板 1.5s · 第78单：食品 2s */
 var PACK_USE_HP  = { bandage: 20, kit: 55, surgery: 100, pain: 0, splint: 0, repair_kit: 0 };
 
 /* ==================== 第36单 通用格网 + 拖拽引擎（背包 / 胸挂共用一套） ====================
@@ -14549,9 +15267,10 @@ function gdResize(){                          /* R 旋转后把幽灵/预览框�
   }
 }
 
-function packBaseWH(id){                   /* 派单「局内背包」占格表（未旋转） */
+function packBaseWH(id){                   /* 派单「局内背包」占格表（未旋转）；第78单：货自带 wh 就用货的 */
   var g = TRADE_GOODS[id];
   if(!g) return [1, 1];
+  if(g.wh) return g.wh.slice();
   if(g.gun){
     var cat = WEAPONS[g.gun] ? WEAPONS[g.gun].cat : 'rifle';
     if(cat === 'smg' || cat === 'shotgun') return [2, 2];
@@ -14613,7 +15332,8 @@ function packLoad(){
       var q = Math.max(1, Math.round(+s.qty || 1));
       if(packStackable(lid)){ if(q > stackMaxOf(lid)) q = stackMaxOf(lid); } else q = 1;
       var cand = { uid: 0, id: lid, x: x, y: y, rot: s.rot ? 1 : 0, qty: q,
-        dur: typeof s.dur === 'number' ? s.dur : 1 };
+        dur: typeof s.dur === 'number' ? s.dur : 1,
+        q: (typeof s.q === 'number' && s.q >= 0 && s.q <= 5) ? (s.q|0) : 0 };   /* 第77单：缺 q 一律补 0（普通） */
       var rd = magRoundsLoad(s, lid); if(rd) cand.rounds = rd;   /* 第37单：满匣带 rounds */
       var wh = packWH(cand), bad = false;
       if(x < 0 || y < 0 || x + wh[0] > PACK_COLS || y + wh[1] > PACK_ROWS) continue;
@@ -14638,7 +15358,7 @@ function packSave(){
     localStorage.setItem(PACK_LS, JSON.stringify({ cols: PACK_COLS, rows: PACK_ROWS,
       items: PACK.items.map(function(it){
         var o = { uid: it.uid, id: it.id, x: it.x, y: it.y, rot: it.rot ? 1 : 0,
-          qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur };
+          qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur, q: it.q || 0 };
         var r = magRoundsSave(it); if(r) o.rounds = r;
         return o;
       }) }));
@@ -14652,16 +15372,18 @@ function packConsume(it, n){
   it.qty = (it.qty || 1) - (n || 1);
   if(it.qty <= 0) packRemoveItem(it); else packSel = it.uid;
 }
-/* 进背包：同 id 同耐久先补满已有堆（≤60），剩的左上→右下找位；任何一步放不下 → 整次回滚 */
-function packAddUnits(id, qty, dur, noSave){
+/* 进背包：同 id 同耐久同品质先补满已有堆（≤60），剩的左上→右下找位；任何一步放不下 → 整次回滚 */
+function packAddUnits(id, qty, dur, noSave, qv){
   var g = TRADE_GOODS[id];
   if(!g || qty <= 0) return { ok: false, why: 'bad' };
+  var qn = (typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0;   /* 第77单：品质 0–5 */
   var d = Math.round((typeof dur === 'number' ? dur : 1) * 100) / 100;
   var snap = JSON.stringify(PACK.items), i, it;
   if(packStackable(id)){
     for(i = 0; i < PACK.items.length && qty > 0; i++){
       it = PACK.items[i];
       if(it.id !== id) continue;
+      if((it.q || 0) !== qn) continue;                 /* 不同品质不混堆 */
       if(Math.round((it.dur == null ? 1 : it.dur) * 100) / 100 !== d) continue;
       var room = stackMaxOf(id) - (it.qty || 1);
       if(room <= 0) continue;
@@ -14670,7 +15392,7 @@ function packAddUnits(id, qty, dur, noSave){
     }
     while(qty > 0){
       var chunk = Math.min(stackMaxOf(id), qty);
-      var ni = { uid: packNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d };
+      var ni = { uid: packNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d, q: qn };
       var sp = packFindSpot(ni);
       if(!sp){ PACK.items = JSON.parse(snap); return { ok: false, why: 'full' }; }
       ni.x = sp.x; ni.y = sp.y; ni.rot = sp.rot;
@@ -14678,7 +15400,7 @@ function packAddUnits(id, qty, dur, noSave){
     }
   } else {
     while(qty > 0){
-      var ni2 = { uid: packNextUid(), id: id, x: 0, y: 0, rot: 0, qty: 1, dur: d };
+      var ni2 = { uid: packNextUid(), id: id, x: 0, y: 0, rot: 0, qty: 1, dur: d, q: qn };
       var sp2 = packFindSpot(ni2);
       if(!sp2){ PACK.items = JSON.parse(snap); return { ok: false, why: 'full' }; }
       ni2.x = sp2.x; ni2.y = sp2.y; ni2.rot = sp2.rot;
@@ -14702,10 +15424,13 @@ function packEquip(it){
     packNote = '已装备 ' + g.name; packNoteBad = false;
   } else if(g.cat === 'armor'){
     var ak = armorKeyOfId(it.id) || 'lv4', ad = ARMOR[ak];
+    var redAdd = qArmorRedAdd(it.q || 0);              /* 第77单：品质减伤加成（封顶 +4%） */
     P.armor = ak;
-    P.armorRed = ad.red; P.armorSpd = ad.spd;
-    P.armorDurMax = ad.dur; P.armorDur = ad.dur; P.armorLv = ad.tier; P.armorBroken = false;  /* 换甲重置耐久 */
-    packNote = '已穿上 ' + ad.n + '（' + ak.toUpperCase() + ' · 减伤 ' + Math.round(ad.red*100) + '% · 耐久 ' + ad.dur + '）';
+    P.armorRed = ad.red + redAdd; P.armorSpd = ad.spd;
+    P.armorDurMax = Math.round(ad.dur * qArmorDurMul(it.q || 0));   /* 神话 +25%，其余小步 */
+    P.armorDur = P.armorDurMax; P.armorLv = ad.tier; P.armorBroken = false;  /* 换甲重置耐久 */
+    packNote = '已穿上 ' + ad.n + '（' + ak.toUpperCase() + ' · 减伤 ' + Math.round(ad.red*100) + '%' +
+      (redAdd > 0 ? '+' + Math.round(redAdd*100) + '%' : '') + ' · 耐久 ' + P.armorDurMax + '）';
     packNoteBad = false;
   } else {
     packNote = g.name + ' 不能装备'; packNoteBad = true;
@@ -14720,6 +15445,11 @@ function packUseStart(it){
     var sec = PACK_USE_SEC[g.kind] == null ? 3 : PACK_USE_SEC[g.kind];
     PACK_CAST = { src: 'pack', uid: it.uid, id: it.id, kind: g.kind, name: g.name, t: 0, total: sec };
     packNote = '使用 ' + g.name + ' · 读条 ' + sec + ' 秒（移动会中断）'; packNoteBad = false;
+  } else if(g.kind === 'food'){              /* 第78单：水/罐头 回 8 体力；满体力不让用 */
+    if(PACK_CAST){ packNote = '正在使用 ' + PACK_CAST.name + ' · 别急'; packNoteBad = true; if(packOpen) renderPack(); return; }
+    if(lootStaOf() >= 100){ packNote = '体力满了 · 喝不下'; packNoteBad = true; if(packOpen) renderPack(); return; }
+    PACK_CAST = { src: 'pack', uid: it.uid, id: it.id, kind: 'food', name: g.name, t: 0, total: PACK_USE_SEC.food };
+    packNote = '吃喝 ' + g.name + ' · 读条 2 秒（移动会中断）'; packNoteBad = false;
   } else if(g.nade){
     var nk = g.nade, have = (P.nades && P.nades[nk]) || 0;
     if(have >= 3){ packNote = '投掷位满了（同种最多 3 个）'; packNoteBad = true; if(packOpen) renderPack(); return; }
@@ -14751,12 +15481,19 @@ function packCastDone(){
   }
   /* 第41单：维修包用后给当前装备 +40 耐久（不超上限） */
   var fixed = (c.kind === 'repair_kit' && P) ? kitRepair() : 0;
+  /* 第78单：食品用后回体力（满 100） */
+  var ate = 0;
+  if(c.kind === 'food' && P){
+    ate = (TRADE_GOODS[c.id] && TRADE_GOODS[c.id].food) || 8;
+    P.sta = Math.min(100, lootStaOf() + ate);
+  }
   if(fromRig){ rigConsume(it, 1); rigSave(); rigBarRender(); }
   else { packConsume(it, 1); packSave(); }
   if(P) P.medUsed = true;
   packNote = c.name + ' 用完' + (hp > 0 ? ' · 回血 +' + hp : '') +
     (splinted ? ' · 固定好 ' + TQ_PART_NAME[splinted] : '') +
-    (c.kind === 'repair_kit' ? ' · 修好 ' + fixed + ' 件装备（+40）' : '');
+    (c.kind === 'repair_kit' ? ' · 修好 ' + fixed + ' 件装备（+40）' : '') +
+    (ate ? ' · 体力 +' + ate : '');
   packNoteBad = false;
   note(packNote);
   packCastBar();
@@ -14778,7 +15515,7 @@ function packFrame(real){                  /* 每帧：读条推进 + 移动中�
 function packDismantle(it){
   var g = TRADE_GOODS[it.id];
   if(!g || !g.gun){ packNote = '只有枪械能拆解'; packNoteBad = true; if(packOpen) renderPack(); return; }
-  var back = Math.max(10, Math.round(stashPrice(it.id) * 0.30 / 10) * 10);
+  var back = Math.max(10, Math.round(qPriceOf(it.id, it.q || 0) * 0.30 / 10) * 10);   /* 第77单：按品质折价 */
   packRemoveItem(it);
   tradeSetMoney(tradeMoney() + back);
   packNote = '拆解 ' + g.name + ' · 回收 ₡' + trFmt(back) + '（30%）'; packNoteBad = false;
@@ -14788,7 +15525,8 @@ function packDismantle(it){
 function packDropItem(it){                 /* 丢弃：留在脚下当地上的掉落物（能再捡回来） */
   var g = TRADE_GOODS[it.id];
   PACK_DROPS.push({ id: it.id, x: P.x + (Math.random() - 0.5) * 18,
-    y: P.y + (Math.random() - 0.5) * 18, qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur });
+    y: P.y + (Math.random() - 0.5) * 18, qty: it.qty || 1, dur: it.dur == null ? 1 : it.dur,
+    q: it.q || 0 });                       /* 第77单：品质跟着掉落物走 */
   packRemoveItem(it);
   packNote = '已丢下 ' + (g ? g.name : it.id); packNoteBad = false;
   packSave();
@@ -14805,8 +15543,9 @@ function packIcon(id){
   }
   return im;
 }
-function packDropSpawn(id, qty, dur, x, y){
-  PACK_DROPS.push({ id: id, x: x, y: y, qty: qty || 1, dur: dur == null ? 1 : dur });
+function packDropSpawn(id, qty, dur, x, y, qv){
+  PACK_DROPS.push({ id: id, x: x, y: y, qty: qty || 1, dur: dur == null ? 1 : dur,
+    q: (typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0 });   /* 第77单：地面掉落带品质 */
 }
 /* 开局在玩家旁边放两件调试掉落物（一件装备 + 一件医疗），只为验证 F 拾取 */
 function packSpawnDebug(){
@@ -14850,7 +15589,7 @@ function packPickupTry(){                  /* 互动键：拾取最近一件（�
   var d = packNearDrop();
   if(!d) return false;
   var g = TRADE_GOODS[d.id], nm = g ? g.name : d.id, q = d.qty || 1;
-  var r = packAddUnits(d.id, q, d.dur);
+  var r = packAddUnits(d.id, q, d.dur, null, d.q || 0);   /* 第77单：拾取保留品质 */
   if(!r.ok){
     packNote = '背包已满'; packNoteBad = true;
     note('背包已满');
@@ -14858,6 +15597,7 @@ function packPickupTry(){                  /* 互动键：拾取最近一件（�
     return true;                           /* 物品不退场，留在地上 */
   }
   for(var i = 0; i < PACK_DROPS.length; i++) if(PACK_DROPS[i] === d){ PACK_DROPS.splice(i, 1); break; }
+  lootGainAdd({ id: d.id, qty: q, dur: d.dur, q: d.q || 0 });   /* 第78单：地面拾取也计入本局收益 */
   packNote = '拾取 ' + nm + (q > 1 ? ' ×' + q : ''); packNoteBad = false;
   note('拾取 ' + nm + (q > 1 ? ' ×' + q : ''));
   if(packOpen) renderPack();
@@ -14909,11 +15649,18 @@ var LOOT_CFG = {
   medbox:{ name:'医疗箱',sec:1.4, vol:0.25, min:1, max:2, w:40, h:38 },
   locker:{ name:'铁皮柜',sec:1.6, vol:0.40, min:2, max:3, w:42, h:58 },
   safe:  { name:'保险箱',sec:4.0, vol:0.60, min:3, max:4, w:50, h:50 },
-  corpse:{ name:'尸体',  sec:1.0, vol:0.20, min:2, max:5, w:34, h:22 }
+  corpse:{ name:'尸体',  sec:1.0, vol:0.20, min:2, max:5, w:34, h:22 },
+  /* 第78单：六种容器补齐 —— 读条按派单表 */
+  ammobox:{ name:'弹药箱', sec:1.2, vol:0.30, min:1, max:2, w:56, h:40 },
+  milbox: { name:'军用箱', sec:1.6, vol:0.35, min:1, max:2, w:62, h:46 },
+  foodbox:{ name:'食品箱', sec:0.9, vol:0.20, min:2, max:3, w:52, h:40 },
+  toolbox:{ name:'工具箱', sec:1.2, vol:0.30, min:1, max:2, w:56, h:40 }
 };
-var LOOT_SPRINKLE = { drawer:9, crate:11, medbox:4, locker:5, safe:2 };  /* 合计 31 个/图 */
+/* 第78单：六种容器每图撒法 —— 总数 = max(8, floor(可站格/90))；保险箱 1–2 个（≥9 个时 2 个）；
+   其余五类加权混撒。第74D单的 lootMul 不再放大撒量，只保留「搜刮图」标记（品质抬高 + 贵重 12%）。 */
+var LOOT_MIX = [ ['ammobox', 0.24], ['medbox', 0.24], ['milbox', 0.18], ['foodbox', 0.18], ['toolbox', 0.16] ];
 var LOOT_TRAY_MAX = 6;
-var LOOT = { containers:[], lastRoll:[], tray:[], cast:null, seed:0 };
+var LOOT = { containers:[], lastRoll:[], tray:[], cast:null, seed:0, open:null, runGain:0 };
 var LOOT_CID = 0, LOOT_TRAY_EL = null, LOOT_BTN_OK = null;
 function lootHash(s){ var h=2166136261,i; for(i=0;i<String(s).length;i++){ h^=String(s).charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 function lootCalOf(wid){
@@ -14944,71 +15691,204 @@ function lootFindSpot(exclude){
   for(i=pool.length-1;i>0;i--){ var k=(Math.random()*(i+1))|0, t=pool[i]; pool[i]=pool[k]; pool[k]=t; }
   return pool;
 }
-/* 每局重撒：场景容器固定数量，尸体由死亡扫描动态加入 */
+/* 每局重撒：六种容器按「可站格/90 至少 8 个」公式，尸体由死亡扫描动态加入 */
+function lootWalkCells(){
+  var n = 0;
+  for(var cy = 0; cy < MH; cy++) for(var cx = 0; cx < MW; cx++) if(!isWall(cx, cy)) n++;
+  return n;
+}
+function lootBoxCount(){
+  return Math.max(8, Math.floor(lootWalkCells() / 90));   /* 第78单派单公式 */
+}
+function lootBoxTierOf(t){                                /* 探针 tier：1 普通 / 2 军用 / 3 保险箱 */
+  return t === 'safe' ? 3 : (t === 'milbox' ? 2 : 1);
+}
 function lootGenerate(seed){
   LOOT.seed = (seed|0) || 20261122;
   LOOT.containers = []; LOOT.lastRoll = []; LOOT.tray = []; LOOT.cast = null; LOOT_CID = 0;
-  var pool = lootFindSpot(), k = 0, type, n;
-  for(type in LOOT_SPRINKLE){
-    n = LOOT_SPRINKLE[type];
-    while(n-- > 0 && k < pool.length){
-      var c = { id:'c'+(++LOOT_CID), type:type, x:pool[k].x, y:pool[k].y, searched:false, loot:[], n:0 };
-      c.loot = lootContainerItems(c, mulberry32((LOOT.seed ^ lootHash(c.id))>>>0));
-      c.n = c.loot.length;
-      LOOT.containers.push(c); k++;
-    }
+  LOOT.runGain = 0; lootBoxClose();
+  var pool = lootFindSpot(), k = 0, i, j;
+  var total = lootBoxCount(), rr = mulberry32((LOOT.seed ^ lootHash('mix78'))>>>0);
+  var nSafe = total >= 9 ? 2 : 1, rest = total - nSafe, kinds = [];
+  for(i = 0; i < rest; i++){                              /* 五类加权混撒（种子定死，同一局一样） */
+    var t = rr(), acc = 0, kind = LOOT_MIX[LOOT_MIX.length - 1][0];
+    for(j = 0; j < LOOT_MIX.length; j++){ acc += LOOT_MIX[j][1]; if(t < acc){ kind = LOOT_MIX[j][0]; break; } }
+    kinds.push(kind);
   }
+  for(i = 0; i < nSafe; i++) kinds.push('safe');
+  for(i = 0; i < kinds.length && k < pool.length; i++){
+    var c = { id:'c'+(++LOOT_CID), type:kinds[i], x:pool[k].x, y:pool[k].y, searched:false, loot:[], n:0 };
+    c.loot = lootContainerItems(c, mulberry32((LOOT.seed ^ lootHash(c.id))>>>0));
+    c.n = c.loot.length;
+    LOOT.containers.push(c); k++;
+  }
+  lootGroundScatter(rr, pool.slice(k));                   /* 地面再撒 6–10 件小物资 */
   lootTrayRender(); lootTraySync();
 }
-/* ---- 掉落生成：稀有度 普通60 / 精良25 / 稀有12 / 史诗3（tier 只是箭头，不进战斗数值） ---- */
-function lootPick(tier, r){
-  var i=(r()*6)|0, cal, cals=['9mm','45','556','762','12ga'];
-  if(tier==='common'){
-    if(i===0) return { id:'ammo_'+cals[(r()*cals.length)|0], qty:30, dur:1 };
-    if(i===1) return { id:'med:bandage', qty:1+((r()*3)|0), dur:1 };
-    if(i===2) return { id:'med:pain', qty:1, dur:1 };
-    if(i===3) return { id:'n:frag', qty:1, dur:1 };
-    if(i===4) return { cash:60+((r()*140)|0) };
-    return { id:'ammo_762', qty:30, dur:1 };
+/* 第78单：地面小物资 —— 六类总表掷 6–10 件，F 直接拾取（packPickupTry）；重撒先清上一轮散落物 */
+function lootGroundScatter(rr, spots){
+  for(var d = PACK_DROPS.length - 1; d >= 0; d--) if(PACK_DROPS[d].scat) PACK_DROPS.splice(d, 1);
+  var n = 6 + ((rr() * 5) | 0), hot = lootMapHot() ? 1 : 0, placed = 0, si = 0;
+  while(placed < n && si < spots.length){
+    var s = spots[si++], bad = false;
+    for(var j = 0; j < LOOT.containers.length; j++)
+      if(Math.hypot(s.x - LOOT.containers[j].x, s.y - LOOT.containers[j].y) < 46){ bad = true; break; }
+    if(bad) continue;
+    var it = lootCatItem(lootCatRoll(rr, hot), rr);
+    it.q = qRollForId(it.id, hot, rr);
+    PACK_DROPS.push({ id:it.id, x:s.x + (rr() - 0.5) * 14, y:s.y + (rr() - 0.5) * 14,
+      qty:it.qty, dur:1, q:it.q, scat:true });
+    placed++;
   }
-  if(tier==='fine'){
-    if(i===0) return { id:'v:armor', dur:0.7+r()*0.3 };
-    if(i===1) return { id:'med:kit', qty:1, dur:1 };
-    if(i===2) return { id:'mag_empty_762', dur:1 };
-    if(i===3) return { id:'med:splint', qty:1, dur:1 };
-    if(i===4) return { id:'n:smoke', qty:1, dur:1 };
-    return { id:'ammo_556', qty:30, dur:1 };
-  }
-  if(tier==='rare'){
-    if(i===0) return { id:'m:supp', dur:1 };
-    if(i===1) return { id:'m:scope4', dur:1 };
-    if(i===2) return { id:'med:surgery', qty:1, dur:1 };
-    if(i===3) return { id:'m:ext', dur:1 };
-    return { id:'mag_full_762', dur:1, rounds:magMakeRounds(30) };
-  }
-  var guns=['amr','atr','gl','svd','m249'];
-  if(i<3){ var wid=guns[(r()*guns.length)|0]; if(WEAPONS[wid]) return { id:wid, dur:0.7+r()*0.3 }; }
-  return { id:'ammo_338', qty:10, dur:1 };
 }
+/* 第74D单：只读探针 __TQ.maps() → [{id,name,n,lootMul}]（无 lootMul 的图给 1）。
+   __TQ 在 part-08 里整体赋值，本分片先挂会被覆盖，故 setTimeout(0) 在主脚本执行完后补挂。 */
+setTimeout(function(){
+  window.__TQ = window.__TQ || {};
+  window.__TQ.maps = function(){
+    var out = [], i;
+    for(i = 0; i < MAPS.length; i++) out.push({ id: MAPS[i].id, name: MAPS[i].name, n: MAPS[i].n, lootMul: MAPS[i].lootMul || 1 });
+    return out;
+  };
+}, 0);
+/* ---- 掉落生成：稀有度 普通60 / 精良25 / 稀有12 / 史诗3（tier 只是箭头，不进战斗数值） ---- */
+/* 第77单：搜刮图（MAPS 里带 lootMul 的 dock/clinic/yard）品质权重抬高，普通 45/优良 30/稀有 16/史诗 6.5/传说 2/神话 0.5 */
+function lootMapHot(){
+  for(var i = 0; i < MAPS.length; i++)
+    if(MAPS[i].id === (typeof S !== 'undefined' && S.mapId)) return MAPS[i].lootMul ? 1 : 0;
+  return 0;
+}
+/* 第78单：六类物资总表 —— 弹药 26 / 医疗 18 / 投掷 10 / 配件 20 / 贵重 8 / 杂物 18；
+   三张搜刮图（dock/clinic/yard）贵重抬到 12（弹药 24 / 杂物 16 找平）。 */
+var LOOT_CATS = [
+  { id:'ammo',     w:0.26, hot:0.24 },
+  { id:'med',      w:0.18, hot:0.18 },
+  { id:'nade',     w:0.10, hot:0.10 },
+  { id:'mod',      w:0.20, hot:0.20 },
+  { id:'valuable', w:0.08, hot:0.12 },
+  { id:'junk',     w:0.18, hot:0.16 }
+];
+function lootCatRoll(r, hot){                /* 按比例掷一类；hot=搜刮图 */
+  var key = hot ? 'hot' : 'w', t = r(), i;
+  for(i = 0; i < LOOT_CATS.length; i++){ if(t < LOOT_CATS[i][key]) return LOOT_CATS[i].id; t -= LOOT_CATS[i][key]; }
+  return 'junk';
+}
+function lootCatItem(cat, r){                /* 掷该类里的一件（基础价都在派单区间内） */
+  var id, qty = 1, cals = ['9mm','45','556','762','12ga'];
+  if(cat === 'ammo'){ id = 'ammo_' + cals[(r() * cals.length) | 0]; qty = 30; }
+  else if(cat === 'med'){
+    var t2 = r();
+    id = t2 < 0.34 ? 'med:bandage' : t2 < 0.58 ? 'med:pain' : t2 < 0.78 ? 'med:kit' : t2 < 0.92 ? 'med:splint' : 'med:surgery';
+    if(id === 'med:bandage') qty = 1 + ((r() * 2) | 0);
+  }
+  else if(cat === 'nade'){ var t3 = r(); id = t3 < 0.5 ? 'n:frag' : (t3 < 0.8 ? 'n:smoke' : 'n:flash'); }
+  else if(cat === 'mod'){
+    var mods = MODS.filter(function(m){ return m.p > 0; }), md = mods[(r() * mods.length) | 0];
+    id = md ? 'm:' + md.id : 'm:supp';
+  }
+  else if(cat === 'valuable'){
+    var t4 = r();
+    id = t4 < 0.35 ? 'g:hdd' : t4 < 0.60 ? 'g:gpu' : t4 < 0.85 ? 'g:watch' : 'g:gold';
+  }
+  else {
+    var t5 = r();
+    id = t5 < 0.22 ? 'j:screw' : t5 < 0.44 ? 'j:batt' : t5 < 0.62 ? 'j:tape' : t5 < 0.82 ? 'f:water' : 'f:can';
+    if(id !== 'f:water' && id !== 'f:can') qty = 1 + ((r() * 2) | 0);
+  }
+  return { id:id, qty:qty, dur:1 };
+}
+function lootCatOfId(id){                    /* 第78单：六类归类（lootCats 探针统计用）；军用箱的枪归「配件」桶 */
+  if(typeof id !== 'string') return '';
+  if(id.indexOf('ammo_') === 0) return 'ammo';
+  var g = TRADE_GOODS[id];
+  if(!g) return '';
+  if(g.gun) return 'mod';
+  if(g.cat === 'ammo' || g.cat === 'mag') return 'ammo';
+  if(g.cat === 'med') return 'med';
+  if(g.nade) return 'nade';
+  if(g.slot || g.cat === 'mod') return 'mod';
+  if(g.cat === 'valuable') return 'valuable';
+  if(g.cat === 'junk') return 'junk';
+  return '';
+}
+function lootValOf(it){                      /* 第78单：估值 = 基础价 × 品质倍率（弹药按「盒」折，一盒 30 发） */
+  if(!it || it.cash) return 0;
+  var g = TRADE_GOODS[it.id];
+  if(!g) return 0;
+  var p = qPriceOf(it.id, it.q || 0);
+  if(g.cat === 'ammo' && g.cal) return Math.max(1, Math.round(p * (it.qty || 1) / ammoUnitRounds(g)));
+  return p * (stashStackable(it.id) ? (it.qty || 1) : 1);
+}
+function lootGainAdd(it){                    /* 捡到就累加估值（撤离结算入钱；现金不算，钱已到手） */
+  if(typeof S === 'undefined' || S.phase !== 'play') return;
+  if(!it || it.cash) return;
+  LOOT.runGain += lootValOf(it);
+}
+function lootStaOf(){                        /* 第78单：体力 0–100（懒初始化，满 100） */
+  if(!P) return 0;
+  if(typeof P.sta !== 'number' || P.sta == null) P.sta = 100;
+  return P.sta;
+}
+function lootStaTick(dt){                    /* 奔跑耗体力 / 走站恢复 —— 给食品箱「回 8 体力」喂资源 */
+  if(!P || !P.alive || S.phase !== 'play') return;
+  lootStaOf();
+  if(P.sprint) P.sta = Math.max(0, P.sta - 6 * dt);
+  else P.sta = Math.min(100, P.sta + (P.moving ? 2.5 : 5) * dt);
+}
+function lootTagQ(items, r, w){              /* 生成出口统一打 q（已带 q 的不重掷）；红档限量在 qRollForId 里查；w=容器专属权重 */
+  for(var i = 0; i < items.length; i++)
+    if(items[i] && items[i].id && items[i].q == null) items[i].q = qRollForId(items[i].id, lootMapHot(), r, w);
+  return items;
+}
+var LOOT_W_MIL  = [0.14, 0.50, 0.30, 0.06];              /* 军用箱：品质偏绿/蓝（优良 50 / 稀有 30） */
+var LOOT_W_SAFE = [0.40, 0.20, 0.09, 0.22, 0.08, 0.01];  /* 保险箱：史诗 22 / 传说 8 / 神话 1 */
 function lootContainerItems(c, r){
-  var cfg=LOOT_CFG[c.type], out=[], n=cfg.min+((r()*(cfg.max-cfg.min+1))|0), i;
-  for(i=0;i<n;i++){
-    var t=r(), tier = t<0.60?'common' : t<0.85?'fine' : t<0.97?'rare':'epic';
-    var it=lootPick(tier,r); if(it) out.push(it);
+  var out = [], i, n;
+  if(c.type === 'medbox'){                                /* 医疗箱：全医疗 */
+    n = 2 + ((r() * 2) | 0);
+    for(i = 0; i < n; i++) out.push(lootCatItem('med', r));
+    return lootTagQ(out, r).slice(0, 3);
+  } else if(c.type === 'ammobox'){                        /* 弹药箱：当前枪口径散装 30–90 发 + 30% 空匣 */
+    var cal = lootCalOf(P ? (P.weapon || P.wid) : '');
+    out.push({ id:'ammo_' + cal, qty:30 + ((r() * 61) | 0), dur:1 });
+    if(r() < 0.30) out.push({ id:'mag_empty_' + cal, dur:1 });
+    return lootTagQ(out, r).slice(0, 2);
+  } else if(c.type === 'milbox'){                         /* 军用箱：配件或枪 */
+    n = 1 + ((r() * 2) | 0);
+    for(i = 0; i < n; i++){
+      if(r() < 0.58){
+        var mods = MODS.filter(function(m){ return m.p > 0; }), md = mods[(r() * mods.length) | 0];
+        out.push(md ? { id:'m:' + md.id, dur:1 } : { id:'m:supp', dur:1 });
+      } else {
+        var guns = [];
+        for(var wi = 0; wi < WEAPON_IDS.length; wi++)
+          if(WEAPONS[WEAPON_IDS[wi]] && WEAPONS[WEAPON_IDS[wi]].cat !== 'melee' && TRADE_GOODS[WEAPON_IDS[wi]]) guns.push(WEAPON_IDS[wi]);
+        out.push({ id:guns[(r() * guns.length) | 0], dur:0.8 + r() * 0.2 });
+      }
+    }
+    return lootTagQ(out, r, LOOT_W_MIL).slice(0, 4);
+  } else if(c.type === 'foodbox'){                        /* 食品箱：水/罐头（各回 8 体力） */
+    n = 2 + ((r() * 2) | 0);
+    for(i = 0; i < n; i++) out.push({ id:r() < 0.5 ? 'f:water' : 'f:can', qty:1, dur:1 });
+    return out.slice(0, 3);
+  } else if(c.type === 'toolbox'){                        /* 工具箱：维修包/夹板 */
+    n = 1 + ((r() * 2) | 0);
+    for(i = 0; i < n; i++) out.push({ id:r() < 0.6 ? 'med:repair_kit' : 'med:splint', qty:1, dur:1 });
+    return out.slice(0, 2);
+  } else if(c.type === 'safe'){                           /* 保险箱：贵重/配件 + 品质修正 + 现金 */
+    n = 2 + ((r() * 2) | 0);
+    for(i = 0; i < n; i++) out.push(r() < 0.68 ? lootCatItem('valuable', r) : lootCatItem('mod', r));
+    out = out.filter(function(x){ return !x.cash; }).slice(0, 3);
+    out.unshift({ cash:300 + ((r() * 901) | 0) });        /* ₡300–1200 */
+    return lootTagQ(out, r, LOOT_W_SAFE).slice(0, 4);
   }
-  if(c.type==='medbox'){
-    var hasMed=false;
-    for(i=0;i<out.length;i++) if(out[i].id && out[i].id.indexOf('med:')===0) hasMed=true;
-    if(!hasMed) out[0]={ id:'med:kit', qty:1, dur:1 };
-  }
-  if(c.type==='safe'){
-    out=out.filter(function(x){return !x.cash;}).slice(0,3);
-    out.unshift({ cash:200+((r()*601)|0) });   /* 保险箱必出 ₡200–800 */
-  }
-  return out.slice(0,6);
+  /* 抽屉/木箱/铁皮柜（旧容器，保留兼容）：六类总表混撒 */
+  n = 1 + ((r() * 3) | 0);
+  for(i = 0; i < n; i++) out.push(lootCatItem(lootCatRoll(r, lootMapHot() ? 1 : 0), r));
+  return lootTagQ(out, r).slice(0, 4);
 }
 /* ---- 尸体掉落 ---- */
-function lootCorpseItems(u, r){
+function lootCorpseItemsBase(u, r){
   var out=[], wid=widOf(u.weapon||u.wid), cal=lootCalOf(u.weapon||u.wid);
   var elite = !!(u.isVip || u.faction==='bodyguard'), ally = u.team==='ally';
   if(elite){
@@ -15039,6 +15919,9 @@ function lootCorpseItems(u, r){
   out.push({ cash:80+((r()*321)|0) });                                 /* ₡80–400 */
   return out.slice(0,6);
 }
+function lootCorpseItems(u, r){               /* 第77单：尸体出货也掷品质（红档限量同源） */
+  return lootTagQ(lootCorpseItemsBase(u, r), r);
+}
 function lootAddCorpse(u){
   var id='p'+(++LOOT_CID), r=mulberry32((LOOT.seed ^ lootHash(id+'x'+Math.round(u.x)+','+Math.round(u.y)))>>>0);
   var items=lootCorpseItems(u,r);
@@ -15064,7 +15947,8 @@ function lootNear(){
   if(!P || !P.alive || S.phase!=='play') return null;
   var best=null, bd=0.8*T;
   for(var i=0;i<LOOT.containers.length;i++){
-    var c=LOOT.containers[i]; if(c.searched) continue;
+    var c=LOOT.containers[i];
+    if(c.searched && !c.loot.length) continue;    /* 第78单：真搜空的才跳过；有剩的还能再开 */
     var d=Math.hypot(c.x-P.x, c.y-P.y);
     if(d<bd){ bd=d; best=c; }
   }
@@ -15082,7 +15966,7 @@ function lootCastSec(c){
 function lootInteractDown(){
   if(LOOT.cast) return true;
   var c=lootNear(); if(!c) return false;
-  if(LOOT.tray.length + c.loot.length > LOOT_TRAY_MAX){ note('战利品槽满了 · 先按 F 捡起'); return true; }
+  if(c.searched && c.loot.length){ lootBoxOpen(c); return true; }   /* 第78单：搜过有剩 → 秒开列表 */
   LOOT.cast={ c:c, t:0, total:lootCastSec(c), hp:P.hp };
   pushSound(c.x, c.y, LOOT_CFG[c.type].vol, 'step');   /* 搜东西会出声；保险箱 0.6 */
   return true;
@@ -15090,6 +15974,13 @@ function lootInteractDown(){
 function lootInteractUp(){ if(LOOT.cast){ LOOT.cast=null; } }
 function lootFrame(real){
   lootScanDeaths();
+  lootStaTick(real);                              /* 第78单：体力流动（喂食品箱） */
+  if(LOOT.open){
+    var oi, gone = true;
+    for(oi = 0; oi < LOOT.containers.length; oi++) if(LOOT.containers[oi] === LOOT.open){ gone = false; break; }
+    if(gone || S.phase!=='play' || !P || !P.alive ||
+       Math.hypot(LOOT.open.x-P.x, LOOT.open.y-P.y) > 1.6*T) lootBoxClose();
+  }
   var c=LOOT.cast; if(!c) return;
   if(S.phase!=='play' || !P || !P.alive || !K['e'] || !c.c || c.c.searched ||
      Math.hypot(c.c.x-P.x, c.c.y-P.y) > 0.95*T || P.hp < c.hp){ LOOT.cast=null; return; }
@@ -15097,10 +15988,11 @@ function lootFrame(real){
   if(c.t >= c.total){
     var done=c.c; LOOT.cast=null;
     if(!done.searched){
-      done.searched=true; LOOT.tray=LOOT.tray.concat(done.loot);
+      done.searched=true;
       LOOT.lastRoll.push({ id:done.id, n:done.n });
-      note('搜完 ' + LOOT_CFG[done.type].name + ' · 按 F 捡起');
-      lootTrayRender(); lootTraySync();
+      note('搜完 ' + LOOT_CFG[done.type].name + ' · 逐件拿或全拿');
+      lootBoxOpen(done);                          /* 第78单：弹物品列表，不再塞战利品槽 */
+      lootTraySync();
     }
   }
 }
@@ -15111,8 +16003,8 @@ function lootTakeAll(){
   for(i=0;i<LOOT.tray.length;i++){
     it=LOOT.tray[i];
     if(it.cash){ tradeSetMoney(tradeMoney()+it.cash); got++; continue; }
-    var qty=it.qty||1, r=packAddUnits(it.id, qty, it.dur==null?1:it.dur);
-    if(r.ok) got++;
+    var qty=it.qty||1, r=packAddUnits(it.id, qty, it.dur==null?1:it.dur, null, it.q||0);   /* 第77单：品质入包 */
+    if(r.ok){ got++; lootGainAdd(it); }    /* 第78单：计入本局收益 */
     else LOOT.tray[left++]=it;             /* 背包满 → 留原地 */
   }
   LOOT.tray.length=left;
@@ -15126,7 +16018,7 @@ function lootToDrop(){
   for(var i=0;i<LOOT.tray.length;i++){
     var it=LOOT.tray[i];
     if(it.cash){ tradeSetMoney(tradeMoney()+it.cash); continue; }
-    packDropSpawn(it.id, it.qty||1, it.dur==null?1:it.dur, P.x+(Math.random()-0.5)*20, P.y+(Math.random()-0.5)*20);
+    packDropSpawn(it.id, it.qty||1, it.dur==null?1:it.dur, P.x+(Math.random()-0.5)*20, P.y+(Math.random()-0.5)*20, it.q||0);
   }
   LOOT.tray=[]; lootTrayRender(); lootTraySync();
   note('战利品已扔在脚下'); return true;
@@ -15160,10 +16052,115 @@ function lootTrayRender(){
       else { cx.fillStyle='#28404f'; cx.fillRect(0,0,44,44); cx.fillStyle='#cfe4f0'; cx.font='20px system-ui'; cx.fillText('?',18,28); }
       cell.appendChild(cv);
       if((it.qty||1)>1){ var b=document.createElement('b'); b.textContent='×'+it.qty; cell.appendChild(b); }
-      cell.title=lootItemName(it)+(it.special?' · '+it.special:'');
+      cell.title=lootItemName(it)+(it.special?' · '+it.special:'')+(it.q?' · '+qNameOf(it):'')+
+        (it.cash?'':' · 类别：'+stashCatName(it)+' · 估值：₡'+trFmt(lootValOf(it)));
     }
     box.appendChild(cell);
   }
+}
+/* ---------- 第78单 容器弹窗：读条完弹出物品列表，逐件「拿」/「全拿」；背包满/超重/体力满 明确报因 ---------- */
+var LOOT_BOX_EL = null;
+function lootBoxClose(){
+  LOOT.open = null;
+  if(LOOT_BOX_EL){ if(LOOT_BOX_EL.parentNode) LOOT_BOX_EL.parentNode.removeChild(LOOT_BOX_EL); LOOT_BOX_EL = null; }
+}
+function lootBoxOpen(c){
+  if(!c || !c.loot.length){ lootBoxClose(); return; }
+  LOOT.open = c;
+  if(!LOOT_BOX_EL){
+    LOOT_BOX_EL = document.createElement('div');
+    LOOT_BOX_EL.id = 'lootBoxPanel';
+    LOOT_BOX_EL.style.cssText = 'position:fixed;left:50%;top:72px;transform:translateX(-50%);width:348px;' +
+      'max-height:56vh;overflow-y:auto;background:rgba(10,18,26,.96);border:1px solid #39515f;border-radius:8px;' +
+      'padding:10px 12px;z-index:70;box-shadow:0 6px 24px rgba(0,0,0,.5);font:13px "Microsoft YaHei",system-ui;color:#cfe4f0;';
+    LOOT_BOX_EL.onclick = function(e){
+      var t = e.target && e.target.closest ? e.target.closest('[data-lb]') : null;
+      if(!t) return;
+      var act = t.getAttribute('data-lb');
+      if(act === 'close') lootBoxClose();
+      else if(act === 'all') lootBoxTakeAll();
+      else if(act === 'take') lootBoxTake(+t.getAttribute('data-i'));
+    };
+    document.body.appendChild(LOOT_BOX_EL);
+  }
+  lootBoxRender();
+}
+function lootBoxRender(){
+  var c = LOOT.open;
+  if(!c || !LOOT_BOX_EL) return;
+  if(!c.loot.length){ lootBoxClose(); return; }
+  var h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<b style="color:#f0d28a">' + LOOT_CFG[c.type].name + ' · 剩 ' + c.loot.length + ' 件</b>' +
+    '<span><button data-lb="all" style="height:26px;margin-right:6px;border:1px solid #c39b46;border-radius:5px;' +
+      'background:#3a2e16;color:#ffe4a0;cursor:pointer">全拿</button>' +
+    '<button data-lb="close" style="height:26px;border:1px solid #4a5d69;border-radius:5px;' +
+      'background:#16242e;color:#9fb6c4;cursor:pointer">关闭</button></span></div>';
+  for(var i = 0; i < c.loot.length; i++){
+    var it = c.loot[i], nm, col, catLn, valLn;
+    if(it.cash){ nm = '现金'; col = '#ffd15c'; catLn = '类别：现金'; valLn = '面值：₡' + trFmt(it.cash); }
+    else {
+      var g = TRADE_GOODS[it.id] || {};
+      nm = g.name || it.id;
+      col = qColorOf(it);                                    /* 名字按品质色 */
+      catLn = '类别：' + stashCatName(it);                    /* 多两行之一：类别 */
+      valLn = '估值：₡' + trFmt(lootValOf(it));               /* 多两行之二：估值 */
+    }
+    h += '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #22323e">' +
+      '<canvas width="34" height="34" data-lb-ic="' + i + '" style="flex:0 0 34px;background:#16242e;border-radius:4px"></canvas>' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="color:' + col + ';font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+          qTagHTML(it.q) + nm + ((it.qty || 1) > 1 ? ' ×' + it.qty : '') + '</div>' +
+        '<div style="font-size:11px;color:#8fa6b6">' + catLn + '</div>' +
+        '<div style="font-size:11px;color:#c9a24e">' + valLn + '</div>' +
+      '</div>' +
+      '<button data-lb="take" data-i="' + i + '" style="flex:0 0 44px;height:30px;border:1px solid #c39b46;' +
+        'border-radius:5px;background:#3a2e16;color:#ffe4a0;cursor:pointer">拿</button></div>';
+  }
+  LOOT_BOX_EL.innerHTML = h;
+  var ics = LOOT_BOX_EL.querySelectorAll('canvas[data-lb-ic]');
+  for(var j = 0; j < ics.length; j++){
+    var idx = +ics[j].getAttribute('data-lb-ic'), it2 = c.loot[idx];
+    var cx2 = ics[j].getContext('2d');
+    var im = it2 && packIcon(it2.id);
+    if(im && im.complete && im.width) cx2.drawImage(im, 0, 0, 34, 34);
+    else { cx2.fillStyle = '#28404f'; cx2.fillRect(0, 0, 34, 34); cx2.fillStyle = '#cfe4f0'; cx2.font = '16px system-ui'; cx2.fillText('?', 13, 22); }
+  }
+}
+function lootBoxTakeOne(c, i){                 /* 拿一件：''=成功，否则返回失败原因（明确报因） */
+  var it = c.loot[i];
+  if(!it) return '';
+  if(it.cash){
+    tradeSetMoney(tradeMoney() + it.cash);
+    c.loot.splice(i, 1); c.n = c.loot.length;
+    note('捡到 ₡' + trFmt(it.cash));
+    return '';
+  }
+  var g = TRADE_GOODS[it.id] || {};
+  if(g.kind === 'food' && lootStaOf() >= 100) return '体力满了 · 喝不下';
+  var kg = packWeight() + packUnitKg({ id:it.id, qty:it.qty || 1, dur:it.dur == null ? 1 : it.dur });
+  if(kg > PACK_KG_MAX) return '超重（' + packWeight().toFixed(1) + '/' + PACK_KG_MAX + ' kg）· 拿不动了';
+  var r = packAddUnits(it.id, it.qty || 1, it.dur == null ? 1 : it.dur, null, it.q || 0);
+  if(!r.ok) return r.why === 'full' ? '背包满了 · 没地方放' : '拿不起来';
+  c.loot.splice(i, 1); c.n = c.loot.length;
+  lootGainAdd(it);                             /* 本局收益 +估值 */
+  note('捡到 ' + (g.name || it.id) + ' · 估值 ₡' + trFmt(lootValOf(it)));
+  return '';
+}
+function lootBoxTake(i){
+  var c = LOOT.open;
+  if(!c) return;
+  var msg = lootBoxTakeOne(c, i | 0);
+  if(msg) note(msg);
+  lootBoxRender();
+}
+function lootBoxTakeAll(){
+  var c = LOOT.open;
+  if(!c) return;
+  var stop = '';
+  while(c.loot.length && !stop) stop = lootBoxTakeOne(c, 0);
+  if(stop) note(stop);
+  if(!c.loot.length) note('全拿完 · ' + LOOT_CFG[c.type].name);
+  lootBoxRender();
 }
 /* ---- Canvas 手绘：5 种容器外形 + 尸体 + 已搜灰「空」 + 金色读条环 ---- */
 function lootDrawContainers(){
@@ -15177,7 +16174,7 @@ function lootDrawContainers(){
     ctx.globalAlpha=0.34; ctx.fillStyle='#000';
     ctx.beginPath(); ctx.ellipse(sx,sy+h*0.44,w*0.56,h*0.20,0,0,6.283); ctx.fill();
     ctx.globalAlpha=1;
-    var dim=c.searched ? 0.34 : 1;
+    var dim=(c.searched && !c.loot.length) ? 0.34 : 1;   /* 第78单：还有剩货的箱子不灰 */
     ctx.globalAlpha=dim;
     if(c.type==='drawer'){
       ctx.fillStyle='#6b4b30'; ctx.fillRect(x,y,w,h);
@@ -15220,12 +16217,40 @@ function lootDrawContainers(){
       ctx.fillRect(sx-w*0.12,sy+3,w*0.24,5);
       ctx.fillStyle='#c9a08a'; ctx.beginPath(); ctx.arc(sx-w*0.42,sy,w*0.13,0,6.283); ctx.fill();
       if(c.elite){ ctx.strokeStyle='#e8c05a'; ctx.lineWidth=1.4; ctx.strokeRect(x-2,y-2,w+4,h+4); }
+    } else if(c.type==='ammobox'){                    /* 第78单：弹药箱 —— 橄榄绿 + 一排黄弹头 */
+      ctx.fillStyle='#4f5b3a'; ctx.fillRect(x,y,w,h);
+      ctx.fillStyle='#5d6c45'; ctx.fillRect(x+2,y+2,w-4,h*0.34-2);
+      ctx.strokeStyle='#333d27'; ctx.lineWidth=1.6; ctx.strokeRect(x,y,w,h);
+      ctx.fillStyle='#d8b166';
+      for(var b2=0;b2<4;b2++) ctx.fillRect(x+6+b2*((w-14)/3), y+h*0.5, 5, h*0.36);
+      ctx.fillStyle='#e8c05a'; ctx.fillRect(sx-8, y+h*0.42, 16, 2.2);
+    } else if(c.type==='milbox'){                      /* 军用箱 —— 深绿 + 白识别带 + 卡扣 */
+      ctx.fillStyle='#3e4a3c'; ctx.fillRect(x,y,w,h);
+      ctx.fillStyle='#4a584a'; ctx.fillRect(x+3,y+3,w-6,h-6);
+      ctx.strokeStyle='#262f26'; ctx.lineWidth=2; ctx.strokeRect(x,y,w,h);
+      ctx.fillStyle='#c8d6c0'; ctx.fillRect(x+w*0.16,y+h*0.44,w*0.68,h*0.14);
+      ctx.fillStyle='#222b22'; ctx.fillRect(x+w*0.2,y+h*0.44,w*0.6,2);
+      ctx.fillStyle='#9fb29a'; ctx.fillRect(sx-2,y+2,4,4); ctx.fillRect(sx-2,y+h-6,4,4);
+    } else if(c.type==='foodbox'){                     /* 食品箱 —— 白皮蓝带 + 两个罐头 */
+      ctx.fillStyle='#dfe8ec'; ctx.fillRect(x,y,w,h);
+      ctx.strokeStyle='#8fa3ad'; ctx.lineWidth=1.4; ctx.strokeRect(x,y,w,h);
+      ctx.fillStyle='#4f86ad'; ctx.fillRect(x,y+h*0.36,w,h*0.2);
+      ctx.fillStyle='#b9c6cd';
+      ctx.beginPath(); ctx.arc(sx-w*0.2,sy+h*0.16,4.5,0,6.283); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+w*0.16,sy+h*0.16,4.5,0,6.283); ctx.fill();
+    } else if(c.type==='toolbox'){                     /* 工具箱 —— 橙红皮 + 提手 + 卡扣 */
+      ctx.fillStyle='#a85527'; ctx.fillRect(x,y,w,h);
+      ctx.fillStyle='#c26631'; ctx.fillRect(x+2,y+2,w-4,h*0.4-2);
+      ctx.strokeStyle='#6e3617'; ctx.lineWidth=1.6; ctx.strokeRect(x,y,w,h);
+      ctx.strokeStyle='#3c2413'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(sx,y,8,Math.PI,0); ctx.stroke();
+      ctx.fillStyle='#d8b166'; ctx.fillRect(sx-5,y+h*0.55,10,3.4);
     }
-    if(c===near && !c.searched){
+    if(c===near && (!c.searched || c.loot.length)){    /* 第78单：可开（没搜过 / 还有剩）就描金框 */
       ctx.globalAlpha=1; ctx.strokeStyle='#e8c05a'; ctx.lineWidth=2;
       ctx.strokeRect(x-3,y-3,w+6,h+6);
     }
-    if(c.searched){
+    if(c.searched && !c.loot.length){
       ctx.globalAlpha=0.9; ctx.fillStyle='rgba(6,10,14,.62)'; ctx.fillRect(x,y,w,h);
       ctx.fillStyle='#9aa8b0'; ctx.font='bold 13px "Microsoft YaHei",sans-serif';
       ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('空',sx,sy);
@@ -15246,12 +16271,24 @@ function lootDrawContainers(){
   }
   /* 屏幕下方提示 */
   if(near && S.phase==='play'){
-    var txt='[E] 搜索 ' + LOOT_CFG[near.type].name + (near.type==='safe'?'（'+(lootHasCrowbar()?'4':'8')+' 秒）':'');
+    var txt = near.searched
+      ? '[E] 打开 ' + LOOT_CFG[near.type].name + '（还有 ' + near.loot.length + ' 件）'
+      : '[E] 搜索 ' + LOOT_CFG[near.type].name + (near.type==='safe'?'（'+(lootHasCrowbar()?'4':'8')+' 秒）':'');
     ctx.save(); ctx.font='14px "Microsoft YaHei",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
     var tw=ctx.measureText(txt).width+26;
     ctx.fillStyle='rgba(8,13,19,.86)'; ctx.fillRect(cw/2-tw/2,ch-112,tw,28);
     ctx.strokeStyle='#7a6232'; ctx.lineWidth=1; ctx.strokeRect(cw/2-tw/2,ch-112,tw,28);
     ctx.fillStyle='#f0d28a'; ctx.fillText(txt,cw/2,ch-98); ctx.restore();
+  }
+  /* 第78单：本局收益小条 —— 捡到就累加估值，撤离结算入钱 */
+  if(S.phase==='play'){
+    var gtxt='本局收益 ₡' + trFmt(Math.round(LOOT.runGain || 0));
+    ctx.save(); ctx.font='bold 13px "Microsoft YaHei",sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    var gw=ctx.measureText(gtxt).width+30, gy=ch-150, gx=cw/2-gw/2;
+    ctx.fillStyle='rgba(8,13,19,.86)'; ctx.fillRect(gx,gy,gw,26);
+    ctx.strokeStyle='#7a6232'; ctx.lineWidth=1; ctx.strokeRect(gx,gy,gw,26);
+    ctx.fillStyle='#ffd15c'; ctx.fillText(gtxt,cw/2,gy+13);
+    ctx.restore();
   }
 }
 /* ---------- 拖拽 / 右键 / 键盘 ---------- */
@@ -15440,9 +16477,10 @@ function renderPack(){
     items += '<div class="pki' + (packSel === it.uid ? ' sel' : '') + (dragging ? ' drag' : '') +
       '" data-uid="' + it.uid + '" title="' + stashName(it) + ' · ' + wh[0] + '×' + wh[1] + '"' +
       ' style="left:' + (it.x * PACK_CELL) + 'px;top:' + (it.y * PACK_CELL) + 'px;width:' +
-      (wh[0] * PACK_CELL) + 'px;height:' + (wh[1] * PACK_CELL) + 'px">' +
+      (wh[0] * PACK_CELL) + 'px;height:' + (wh[1] * PACK_CELL) + 'px;box-shadow:inset 3px 0 0 ' + qColorOf(it) +
+      (packSel === it.uid ? ',inset 0 0 0 1px #5b93b3' : '') + '">' +
       '<img class="' + (g && g.gun ? 'g' : '') + '" src="' + tradeIconURL(it.id) + '" alt="">' +
-      (wh[0] * wh[1] >= 4 ? '<div class="nm">' + stashName(it) + '</div>' : '') +
+      (wh[0] * wh[1] >= 4 ? '<div class="nm" style="color:' + qColorOf(it) + '">' + qTagHTML(it.q) + stashName(it) + '</div>' : '') +
       ((it.qty || 1) > 1 ? '<div class="q">×' + it.qty + '</div>' : '') +
       '</div>';
   }
@@ -15451,8 +16489,9 @@ function renderPack(){
     var swh = packWH(sel), sg = TRADE_GOODS[sel.id] || {};
     var durTxt = (sg.gun || sg.cat === 'armor') ?
       Math.round((sel.dur == null ? 1 : sel.dur) * 100) + '%' : '—';
-    info = '<div class="big">' + stashName(sel) + '</div>' +
+    info = '<div class="big" style="color:' + qColorOf(sel) + '">' + qTagHTML(sel.q) + stashName(sel) + '</div>' +
       '<div class="pkrow"><span>类别</span><b>' + stashCatName(sel) + '</b></div>' +
+      '<div class="pkrow"><span>品质</span><b style="color:' + qColorOf(sel) + '">' + qNameOf(sel) + '</b></div>' +
       '<div class="pkrow"><span>占格</span><b>' + swh[0] + '×' + swh[1] + '（' + (swh[0] * swh[1]) + ' 格）</b></div>' +
       '<div class="pkrow"><span>数量</span><b>' + (sel.qty || 1) +
         ((sg.cat === 'ammo' && sg.cal) ? ' 发' : '') + '</b></div>' +
@@ -15541,20 +16580,23 @@ function packSettle(win){
   /* 第51单：写回仓库必须「撤离成功 === true 且 玩家存活 === true」；
      死亡/失败一件都不写回，并恢复开局前背包快照（只丢本局捡的东西）。 */
   var ok = !!win && !!P && P.alive === true;
-  var res = { win: ok, moved: 0, cells: 0, fail: [], lost: 0, lostCells: 0 };
+  var res = { win: ok, moved: 0, cells: 0, fail: [], lost: 0, lostCells: 0, gain: 0, gainLost: 0 };
   var i, it, wh, sq;
   if(ok){
     stashLoad();
     var left = [];
     for(i = 0; i < PACK.items.length; i++){
       it = PACK.items[i]; wh = packWH(it); sq = wh[0] * wh[1];
-      var r = stashAddUnits(it.id, it.qty || 1, it.dur, true);
+      var r = stashAddUnits(it.id, it.qty || 1, it.dur, true, it.q || 0);   /* 第77单：撤离入库带品质 */
       if(r.ok){ res.moved += (it.qty || 1); res.cells += sq; }
       else { res.fail.push(stashName(it)); left.push(it); }
     }
     stashSave();
     PACK.items = left;                         /* 放不下的留在背包，结算页逐条列出 */
+    res.gain = Math.round(LOOT.runGain || 0);  /* 第78单：本局收益（摸到物资的估值）入钱 */
+    if(res.gain > 0) tradeSetMoney(tradeMoney() + res.gain);
   } else {
+    res.gainLost = Math.round(LOOT.runGain || 0);   /* 第78单：阵亡 → 本局收益一并丢失 */
     var back = [], j, had = {};
     try{ back = JSON.parse(S.raidPack0 || '[]'); }catch(e){ back = []; }
     if(!(back instanceof Array)) back = [];
@@ -15569,6 +16611,7 @@ function packSettle(win){
   }
   PACK_CAST = null; packSel = null;
   packCastBar();
+  LOOT.runGain = 0; lootBoxClose();            /* 第78单：收益已入账/已没收，弹窗收起 */
   if(packOpen) closePack();                  /* 结算时面板一并收起 */
   packSave();
   S.packRes = res;
@@ -15581,7 +16624,7 @@ function packMiniHTML(){
     it = PACK.items[i]; wh = packWH(it); g = TRADE_GOODS[it.id];
     h += '<div class="stpi" data-pk-uid="' + it.uid + '" title="' + stashName(it) +
       ' · 点一下取回仓库" style="left:' + (it.x * 22) + 'px;top:' + (it.y * 22) + 'px;width:' +
-      (wh[0] * 22) + 'px;height:' + (wh[1] * 22) + 'px">' +
+      (wh[0] * 22) + 'px;height:' + (wh[1] * 22) + 'px;box-shadow:inset 3px 0 0 ' + qColorOf(it) + '">' +
       '<img class="' + (g && g.gun ? 'g' : '') + '" src="' + tradeIconURL(it.id) + '" alt=""></div>';
   }
   return '<div class="stpgrid">' + h + '</div>';
@@ -15590,13 +16633,16 @@ function packMiniHTML(){
 function packResultRows(){
   var r = S.packRes;
   if(!r) return '';
+  if(r.ent) return '<div class="row"><span class="k">背包</span>娱乐模式 · 仓库只读 · 不结算（物资 / 耐久 / 钱 零变动）</div>';   /* 第76单 */
   var h = '', i;
   if(r.win){
     h += '<div class="row"><span class="k">背包</span>撤离 · 入库 ' + r.moved + ' 件（' + r.cells + ' 格）</div>';
+    if(r.gain) h += '<div class="row"><span class="k">本局收益</span>摸到 ₡' + trFmt(r.gain) + ' · 已入账</div>';   /* 第78单 */
     for(i = 0; i < r.fail.length; i++)
       h += '<div class="row"><span class="k">仓库放不下</span>' + r.fail[i] + ' · 留在背包</div>';
   } else {
     h += '<div class="row"><span class="k">背包</span>阵亡 · 丢失 ' + r.lost + ' 件（' + r.lostCells + ' 格）</div>';
+    if(r.gainLost) h += '<div class="row"><span class="k">本局收益</span>₡' + trFmt(r.gainLost) + ' · 随背包一并丢失</div>';   /* 第78单 */
     h += '<div class="row" style="color:#ff5a5a;font-weight:600">任务失败 · 本次行动带出的物资已丢失</div>';
   }
   return h;
@@ -15605,7 +16651,7 @@ function packResultRows(){
 function stashToPack(){                       /* 仓库选中件 → 背包（整叠搬） */
   var it = stashById(stashSel);
   if(!it) return;
-  var qty = it.qty || 1, r = packAddUnits(it.id, qty, it.dur);
+  var qty = it.qty || 1, r = packAddUnits(it.id, qty, it.dur, null, it.q || 0);   /* 第77单：品质跟着走 */
   if(!r.ok){
     stashNote = '背包已满（10×6）· 装不进去'; stashNoteBad = true; renderStash(); return;
   }
@@ -15618,7 +16664,7 @@ function packToStash(uid){                    /* 背包里的小格 → 仓库 *
   if(!it) return;
   var qty = it.qty || 1, nm = stashName(it);
   stashLoad();
-  var r = stashAddUnits(it.id, qty, it.dur, false);
+  var r = stashAddUnits(it.id, qty, it.dur, false, it.q || 0);   /* 第77单：品质跟着走 */
   if(!r.ok){
     stashNote = '仓库放不下 ' + nm; stashNoteBad = true; renderStash(); return;
   }
@@ -15694,7 +16740,8 @@ function rigLoad(){
       var u = Math.round(+s.uid || 0);
       if(u > 0) for(j = 0; j < items.length; j++) if(items[j].uid === u){ u = 0; break; }
       var ritem = { uid: u, id: lid, x: x, y: y, rot: 0, qty: q,
-        dur: typeof s.dur === 'number' ? s.dur : 1 };
+        dur: typeof s.dur === 'number' ? s.dur : 1,
+        q: (typeof s.q === 'number' && s.q >= 0 && s.q <= 5) ? (s.q|0) : 0 };   /* 第77单：缺 q 补 0 */
       var rd = magRoundsLoad(s, lid); if(rd) ritem.rounds = rd;   /* 第40单：胸挂满匣也带 rounds（混装） */
       items.push(ritem);
     }
@@ -15709,19 +16756,21 @@ function rigSave(){
     localStorage.setItem(RIG_LS, JSON.stringify({ cols: RIG_COLS, rows: RIG_ROWS,
       items: RIG.items.map(function(it){
         var o = { uid: it.uid, id: it.id, x: it.x, y: it.y, qty: it.qty || 1,
-          dur: it.dur == null ? 1 : it.dur };
+          dur: it.dur == null ? 1 : it.dur, q: it.q || 0 };
         var r = magRoundsSave(it); if(r) o.rounds = r;
         return o;
       }) }));
   }catch(e){}
 }
-function rigAddUnits(id, qty, dur, noSave){  /* 塞货：先补满同 id 同耐久的格（≤60），再左上→右下找空格 */
+function rigAddUnits(id, qty, dur, noSave, qv){  /* 塞货：先补满同 id 同耐久同品质的格（≤60），再左上→右下找空格 */
   if(!rigSmall(id) || !(qty > 0)) return { ok: false, why: 'small' };
+  var qn = (typeof qv === 'number' && qv >= 0 && qv <= 5) ? (qv|0) : 0;   /* 第77单：品质 0–5 */
   var d = Math.round((typeof dur === 'number' ? dur : 1) * 100) / 100;
   var snap = JSON.stringify(RIG.items), left = qty, i, it;
   for(i = 0; i < RIG.items.length && left > 0 && stashStackable(id); i++){
     it = RIG.items[i];
     if(it.id !== id) continue;
+    if((it.q || 0) !== qn) continue;                 /* 不同品质不混堆 */
     if(Math.round((it.dur == null ? 1 : it.dur) * 100) / 100 !== d) continue;
     var room = stackMaxOf(id) - (it.qty || 1);
     if(room <= 0) continue;
@@ -15730,7 +16779,7 @@ function rigAddUnits(id, qty, dur, noSave){  /* 塞货：先补满同 id 同耐�
   }
   while(left > 0){
     var chunk = stashStackable(id) ? Math.min(stackMaxOf(id), left) : 1;
-    var ni = { uid: rigNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d };
+    var ni = { uid: rigNextUid(), id: id, x: 0, y: 0, rot: 0, qty: chunk, dur: d, q: qn };
     var sp = gdFindSpot(RIG, ni);
     if(!sp){ RIG.items = JSON.parse(snap); return { ok: false, why: 'full' }; }
     ni.x = sp.x; ni.y = sp.y;
@@ -15753,7 +16802,8 @@ function rigMiniHTML(){
     var dragging = !!(packDrag && packDrag.kind === 'rig' && packDrag.uid === it.uid);
     h += '<div class="rigi' + (dragging ? ' drag' : '') + '" data-uid="' + it.uid + '" title="' + stashName(it) +
       (qi < 4 ? ' · 快取 ' + (qi + 1) : '') + ' · 双击放回仓库" style="left:' + (it.x * RIG_CELL) +
-      'px;top:' + (it.y * RIG_CELL) + 'px;width:' + RIG_CELL + 'px;height:' + RIG_CELL + 'px">' +
+      'px;top:' + (it.y * RIG_CELL) + 'px;width:' + RIG_CELL + 'px;height:' + RIG_CELL +
+      'px;box-shadow:inset 3px 0 0 ' + qColorOf(it) + '">' +
       '<img src="' + tradeIconURL(it.id) + '" alt="">' +
       ((it.qty || 1) > 1 ? '<div class="q">×' + it.qty + '</div>' : '') + '</div>';
   }
@@ -15776,7 +16826,7 @@ function rigTakeFromStash(){                    /* 仓库 → 胸挂（整叠搬
   if(!rigSmall(it.id)){ rigNote('胸挂只装小件', true); renderStash(); return; }
   if(rigAt(rx, ry)){ rigNote('那一格有东西 · 换个格子', true); renderStash(); return; }
   RIG.items.push({ uid: rigNextUid(), id: it.id, x: rx, y: ry, rot: 0, qty: qty,
-    dur: it.dur == null ? 1 : it.dur });
+    dur: it.dur == null ? 1 : it.dur, q: it.q || 0 });   /* 第77单：品质跟着走 */
   stashRemoveItem(it);
   rigSave(); stashSave();
   rigNote('已装进胸挂 · ' + nm + (qty > 1 ? ' ×' + qty : ''), false);
@@ -15787,7 +16837,7 @@ function rigDropToStash(){                      /* 胸挂 → 仓库（拖到仓
   if(!d || d.ext !== 'stash') return false;
   var it = d.item, nm = stashName(it), qty = it.qty || 1;
   stashLoad();
-  var r = stashAddUnits(it.id, qty, it.dur, false);
+  var r = stashAddUnits(it.id, qty, it.dur, false, it.q || 0);   /* 第77单：品质跟着走 */
   if(!r.ok){ rigNote('仓库放不下 ' + nm, true); return false; }
   stashSave();
   rigRemoveItem(it); rigSave();
@@ -15800,7 +16850,7 @@ function rigSendBack(uid){                      /* 双击胸挂里的东西 → 
   if(!it) return;
   var nm = stashName(it), qty = it.qty || 1;
   stashLoad();
-  var r = stashAddUnits(it.id, qty, it.dur, false);
+  var r = stashAddUnits(it.id, qty, it.dur, false, it.q || 0);   /* 第77单：品质跟着走 */
   if(!r.ok){ rigNote('仓库放不下 ' + nm, true); renderStash(); return; }
   stashSave();
   rigRemoveItem(it); rigSave();
@@ -15916,15 +16966,130 @@ function benchBuy(mid){
   note('买到 ' + m.n + ' · −₡' + m.p);
   return true;
 }
+/* ---------- 第79单 改枪台两条确认路径：先改预览（不动 loadout），确认时「购买并装配 / 只装配」 ----------
+   gsPv = 预览配件表；确认前退出 = 白改（loadout 原样）。配件实体在仓库，枪上只是装配引用。 */
+var gsPv = null, gsPvWid = '';
+function gsPvReset(wid){ gsPv = JSON.parse(JSON.stringify(normMods(loadout[wid] || (loadout[wid] = {})))); gsPvWid = wid; }
+function gsModsCost(mods){
+  var c = 0, i;
+  for(i = 0; i < MOD_ORDER.length; i++) c += attDef(MOD_ORDER[i], mods[MOD_ORDER[i]]).p || 0;
+  return c;
+}
+function benchOwnedGun(wid){                       /* 枪本身是否已拥有（仓库有 / 剧情态已购） */
+  var i;
+  for(i = 0; i < STASH.items.length; i++) if(STASH.items[i].id === wid) return true;
+  return !!(STORY.pending && STORY.gear && widOf(STORY.gear.gun) === wid);
+}
+function gsBuyPrice(wid, mods){                    /* 购买并装配的扣款额 = 未拥有配件合计 +（枪未拥有时）枪价 */
+  var c = 0, i;
+  if(!benchOwnedGun(wid)) c += ld3Cents(wid);
+  for(i = 0; i < MOD_ORDER.length; i++){
+    var id = mods[MOD_ORDER[i]];
+    if(id && !benchOwned(id)) c += attDef(MOD_ORDER[i], id).p || 0;
+  }
+  return c;
+}
+function gsFitGaps(mods){                          /* 只装配时仓库缺货的槽位文案 */
+  var gaps = [], i;
+  for(i = 0; i < MOD_ORDER.length; i++){
+    var id = mods[MOD_ORDER[i]];
+    if(id && !benchOwned(id)) gaps.push(MOD_CATS[MOD_ORDER[i]] + '·' + attDef(MOD_ORDER[i], id).n);
+  }
+  return gaps;
+}
+function gsStashCanTake(mid){                      /* 预检：仓库能不能再收一件该配件（补堆或找空位），绝不吞件 */
+  var id = 'm:' + mid, i;
+  if(stashStackable(id)){
+    for(i = 0; i < STASH.items.length; i++)
+      if(STASH.items[i].id === id && (STASH.items[i].qty || 1) < stackMaxOf(id)) return true;
+  }
+  return !!stashFindSpot({ uid: -1, id: id, x: 0, y: 0, rot: 0, qty: 1, dur: 1 });
+}
+function gsBackList(wid, mods){                    /* 确认后要被换下的旧付费件（回仓库守恒） */
+  var out = [], i;
+  for(i = 0; i < MOD_ORDER.length; i++){
+    var s = MOD_ORDER[i], old = loadout[wid][s], nw = mods[s];
+    if(nw !== old && old !== 'none' && old !== 'bstd' && attDef(s, old).p > 0) out.push({ slot: s, mid: old });
+  }
+  return out;
+}
+function gsPrecheckBack(wid, mods){                /* 换下件回仓库放得下才执行；放不下 → 不装配不扣钱 */
+  var back = gsBackList(wid, mods), i;
+  for(i = 0; i < back.length; i++) if(!gsStashCanTake(back[i].mid)) return false;
+  return true;
+}
+function gsCommitApply(wid, mods){                 /* 两条路径共用的落装：换下件回仓库 → loadout = 预览 */
+  var back = gsBackList(wid, mods), i;
+  for(i = 0; i < back.length; i++) stashAddUnits('m:' + back[i].mid, 1, 1, false);
+  for(i = 0; i < MOD_ORDER.length; i++) loadout[wid][MOD_ORDER[i]] = mods[MOD_ORDER[i]];
+  loadoutSave();
+}
+function gsBuyCommit(wid){                         /* 【购买并装配】：扣钱 → 配件直接装上 */
+  if(!gsPv) return;
+  var price = gsBuyPrice(wid, gsPv);
+  if(tradeMoney() < price){ note('差 ₡' + (price - tradeMoney()) + '，买不起'); return; }
+  if(!gsPrecheckBack(wid, gsPv)){ note('仓库放不下换下的旧配件 · 装配未执行'); return; }
+  tradeSetMoney(tradeMoney() - price);
+  gsCommitApply(wid, gsPv);
+  note('已购买并装配 · −₡' + price);
+  gsPv = null;
+  closeGunsmith();
+}
+function gsFitCommit(wid){                         /* 【只装配】：仓库有的装（−1），没有的槽保持原样并提示 */
+  if(!gsPv) return;
+  var gaps = gsFitGaps(gsPv), fitted = 0, i, s;
+  /* 预检：将被换下的旧付费件回仓库放得下才执行（缺货槽不动、无换下，不计入） */
+  var willBack = [], willFit = [];
+  for(i = 0; i < MOD_ORDER.length; i++){
+    s = MOD_ORDER[i];
+    var nw = gsPv[s], old = loadout[wid][s];
+    if(nw === old) continue;
+    if(!benchOwned(nw)) continue;                  /* 缺货槽：保持原件，最后统一提示 */
+    willFit.push({ slot: s, mid: nw });
+    if(old !== 'none' && old !== 'bstd' && attDef(s, old).p > 0) willBack.push(old);
+  }
+  for(i = 0; i < willBack.length; i++) if(!gsStashCanTake(willBack[i])){ note('仓库放不下换下的旧配件 · 装配未执行'); return; }
+  for(i = 0; i < willBack.length; i++) stashAddUnits('m:' + willBack[i], 1, 1, false);
+  for(i = 0; i < willFit.length; i++){
+    gsConsumeOne(willFit[i].mid);
+    loadout[wid][willFit[i].slot] = willFit[i].mid;
+    fitted++;
+  }
+  stashSave();                                     /* 第79单：消耗/回仓都要落盘，防下次 stashLoad 把消耗读回来 */
+  loadoutSave();
+  if(gaps.length){
+    for(i = 0; i < MOD_ORDER.length; i++){ s = MOD_ORDER[i]; gsPv[s] = loadout[wid][s]; }  /* 预览同步成已装结果 */
+    note('装好 ' + fitted + ' 件 · 仓库没有：' + gaps.join(' · ') + '（去交易买）');
+    renderGunsmith();
+    return;
+  }
+  note('已从仓库装配 ' + fitted + ' 件');
+  gsPv = null;
+  closeGunsmith();
+}
+function gsConsumeOne(mid){                        /* 仓库扣 1 件配件（qty>1 减数，单件删实例） */
+  var id = 'm:' + mid, i, it;
+  for(i = 0; i < STASH.items.length; i++){
+    it = STASH.items[i];
+    if(it.id !== id) continue;
+    if((it.qty || 1) > 1){ it.qty--; return; }
+    stashRemoveItem(it);
+    return;
+  }
+}
 function benchStatRow(label, b, c, fmt, worseWhenUp){
   if(Math.abs(c-b) < 0.0005) return '<div class="bs">' + label + ' <span>' + fmt(c) + '</span></div>';
   var up = worseWhenUp ? c < b : c > b;                  /* 伤害/射速/精度：升=好；后坐/重量：降=好 */
   return '<div class="bs">' + label + ' <span class="' + (up?'up':'bad') + '">' +
     (up?'▲':'▼') + ' ' + fmt(c) + '</span><b>原 ' + fmt(b) + '</b></div>';
 }
-function drawBenchGun(cv, wid){
+function drawBenchGun(cv, wid, mods){
   if(!cv || !cv.getContext) return;
   var c = cv.getContext('2d'), sp = gunSpec({ wid: wid }), shape = wShape(wid);
+  /* 第79单：配件也画进剖面（预览表）—— 枪管长短直接改 tl */
+  var att0 = mods || loadout[wid] || {};
+  if(att0.barrel === 'bshort') sp.tl = Math.max(5, sp.tl - 5);
+  else if(att0.barrel === 'blong') sp.tl += 5;
   c.setTransform(1,0,0,1,0,0); c.clearRect(0,0,640,260);
   c.fillStyle = '#08121a'; c.fillRect(0,0,640,260);
   c.strokeStyle = 'rgba(120,150,170,.07)'; c.lineWidth = 1;
@@ -15933,31 +17098,71 @@ function drawBenchGun(cv, wid){
   var k = 7, cy = 132, x0 = 150;
   var bl = sp.bl*k, tl = sp.tl*k, bw = sp.bw*k, tw = Math.max(2,sp.tw)*k;
   var xb = x0 + sp.stock*k, xr = xb + bl, xm = xr + tl;
-  c.fillStyle = '#546b7c'; c.strokeStyle = '#9db6c6'; c.lineWidth = 1.5;
-  /* 枪托（按型号分轮廓） */
+  /* 第79单：机身/托配色按型号 —— SCAR 沙色、AK 木托、镂空托深灰，其余军灰 */
+  var bodyC = sp.tan ? '#8a7a52' : '#546b7c';
+  var stockC = sp.stockSt === 'wood' ? '#6b4a2e' : (sp.stockSt === 'skel' || sp.stockSt === 'fold') ? '#3d4750' : bodyC;
+  c.strokeStyle = '#9db6c6'; c.lineWidth = 1.5;
+  /* 枪托（按型号分轮廓：skel 镂空 / fold 方厚 / tube 细 / bull 无托块） */
+  c.fillStyle = stockC;
   c.beginPath();
   if(sp.stock>0 && shape!=='pistol' && shape!=='revolver'){
-    c.moveTo(x0,cy-bw*0.62); c.lineTo(xb,cy-bw*0.5); c.lineTo(xb,cy+bw*0.5);
-    c.lineTo(x0,cy+bw*0.72); c.lineTo(x0+6,cy+bw*0.32); c.lineTo(x0+6,cy-bw*0.32);
+    if(sp.stockSt === 'skel'){
+      c.moveTo(x0,cy-bw*0.62); c.lineTo(xb,cy-bw*0.5); c.lineTo(xb,cy+bw*0.5);
+      c.lineTo(x0,cy+bw*0.72); c.lineTo(x0+6,cy+bw*0.4); c.lineTo(x0+6,cy-bw*0.4);
+    } else if(sp.stockSt === 'fold'){
+      c.moveTo(x0,cy-bw*0.68); c.lineTo(xb,cy-bw*0.6); c.lineTo(xb,cy+bw*0.6);
+      c.lineTo(x0,cy+bw*0.68); c.lineTo(x0+4,cy+bw*0.34); c.lineTo(x0+4,cy-bw*0.34);
+    } else {
+      c.moveTo(x0,cy-bw*0.62); c.lineTo(xb,cy-bw*0.5); c.lineTo(xb,cy+bw*0.5);
+      c.lineTo(x0,cy+bw*0.72); c.lineTo(x0+6,cy+bw*0.32); c.lineTo(x0+6,cy-bw*0.32);
+    }
   } else { c.moveTo(x0,cy-bw*0.45); c.lineTo(xb,cy-bw*0.5); c.lineTo(xb,cy+bw*0.5); c.lineTo(x0,cy+bw*0.45); }
   c.closePath(); c.fill(); c.stroke();
+  if(sp.stock>0 && sp.stockSt === 'skel'){
+    c.fillStyle = '#08121a'; c.fillRect(x0+8, cy-bw*0.24, sp.stock*k-8, bw*0.48);   /* 镂空 */
+    c.strokeStyle = '#9db6c6'; c.strokeRect(x0+8, cy-bw*0.24, sp.stock*k-8, bw*0.48);
+  }
   /* 机匣 */
+  c.fillStyle = bodyC;
   c.fillRect(xb,cy-bw/2,bl,bw); c.strokeRect(xb,cy-bw/2,bl,bw);
+  /* 第79单：上机匣特征 —— 提把 / 平顶皮轨 / 无托脊线 */
+  c.fillStyle = '#39454f';
+  if(sp.rail){ c.fillRect(xb, cy-bw/2-4, bl, 4); c.strokeRect(xb, cy-bw/2-4, bl, 4); }
+  else if(sp.bullpup){ c.fillRect(xb+bl*0.15, cy-bw/2-4, bl*0.85+tl*sp.foreL*0.4, 4); }
+  else if(sp.carry){ c.fillRect(xb+bl*0.2, cy-bw/2-6, bl*0.55, 6); c.strokeRect(xb+bl*0.2, cy-bw/2-6, bl*0.55, 6); }
   /* 枪管 + 枪口 */
+  c.fillStyle = '#546b7c';
   c.fillRect(xr,cy-tw/2,tl,tw); c.strokeRect(xr,cy-tw/2,tl,tw);
-  var supp = (loadout[wid]||{}).muzzle === 'supp';
-  c.fillRect(xm-(supp?26:8),cy-tw*(supp?1.0:0.72)/2,(supp?26:8),tw*(supp?1.0:0.72));
-  /* 握把 / 弹匣 */
-  c.beginPath(); c.moveTo(xb+bl*0.42,cy+bw*0.35); c.lineTo(xb+bl*0.70,cy+bw*0.35);
-  c.lineTo(xb+bl*0.62,cy+bw*1.9); c.lineTo(xb+bl*0.30,cy+bw*1.9); c.closePath(); c.fill(); c.stroke();
+  /* 第79单：护木盖住枪管根部（长度按 foreL）—— AK 木 / SCAR 沙 / 其余深灰 */
+  if(sp.foreL){
+    c.fillStyle = sp.wood ? '#6b4a2e' : (sp.tan ? '#8a7a52' : '#3a4550');
+    c.fillRect(xr, cy-tw/2-3, tl*sp.foreL, tw+6); c.strokeRect(xr, cy-tw/2-3, tl*sp.foreL, tw+6);
+  }
+  var supp = att0.muzzle === 'supp', brake = att0.muzzle && att0.muzzle !== 'none' && att0.muzzle !== 'supp';
+  c.fillStyle = '#546b7c';
+  c.fillRect(xm-(supp?26:brake?12:8),cy-tw*(supp?1.0:0.72)/2,(supp?26:brake?12:8),tw*(supp?1.0:0.72));
+  /* 握把 / 弹匣（位置按型号：magX 无托枪靠后、foreX 前握把） */
+  c.fillStyle = bodyC;
+  c.beginPath(); c.moveTo(xb+bl*(sp.foreX||0.42),cy+bw*0.35); c.lineTo(xb+bl*(sp.foreX||0.42)+bl*0.26,cy+bw*0.35);
+  c.lineTo(xb+bl*(sp.foreX||0.42)+bl*0.18,cy+bw*1.9); c.lineTo(xb+bl*(sp.foreX||0.42)-bl*0.14,cy+bw*1.9); c.closePath(); c.fill(); c.stroke();
   if(sp.mag){
-    var ml = (sp.magLen||10)*k*0.55;
-    c.beginPath(); c.moveTo(xb+bl*0.30,cy+bw/2); c.lineTo(xb+bl*0.66,cy+bw/2);
-    c.lineTo(xb+bl*0.62,cy+bw/2+ml); c.lineTo(xb+bl*0.34,cy+bw/2+ml);
+    var ml = (sp.magLen||10)*k*0.55, mx = xb + bl*(sp.magX||0.42);
+    c.fillStyle = sp.trans ? 'rgba(150,182,205,.55)' : bodyC;
+    c.beginPath();
+    if(sp.curveMag){
+      c.moveTo(mx,cy+bw/2); c.lineTo(mx+12,cy+bw/2);
+      c.lineTo(mx+19,cy+bw/2+ml+3); c.lineTo(mx+3,cy+bw/2+ml+1);
+    } else {
+      c.moveTo(mx,cy+bw/2); c.lineTo(mx+11,cy+bw/2);
+      c.lineTo(mx+9,cy+bw/2+ml); c.lineTo(mx-2,cy+bw/2+ml);
+    }
     c.closePath(); c.fill(); c.stroke();
+    if(sp.trans){ c.strokeStyle = 'rgba(210,230,245,.6)'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(mx+6,cy+bw/2+3); c.lineTo(mx+12,cy+bw/2+ml-2); c.stroke();
+      c.strokeStyle = '#9db6c6'; c.lineWidth = 1.5; }
   }
   /* 瞄具（按档位画镜筒） */
-  var oid = (loadout[wid]||{}).optic || 'none', oz = (OPTICS[oid]||OPTICS.none).zoom;
+  var oid = att0.optic || 'none', oz = (OPTICS[oid]||OPTICS.none).zoom;
   if(oz>1){
     var mw = 18+oz*8, mh = 8+oz*2;
     c.fillStyle='#3b5364'; c.fillRect(xb+bl*0.45-mw/2,cy-bw/2-mh,mw,mh);
@@ -15973,8 +17178,8 @@ function drawBenchGun(cv, wid){
     { i:1, s:'muzzle', x:xm+4, y:cy-4 },
     { i:2, s:'barrel', x:(xr+xm)/2, y:cy-tw/2-3 },
     { i:3, s:'optic',  x:xb+bl*0.45, y:cy-bw/2-(oz>1?8+oz*2:9) },
-    { i:4, s:'mag',    x:xb+bl*0.48, y:cy+bw/2+((sp.mag||0)?(sp.magLen||10)*k*0.55:0) },
-    { i:5, s:'grip',   x:xb+bl*0.48, y:cy+bw*1.7 },
+    { i:4, s:'mag',    x:xb+bl*(sp.magX||0.48), y:cy+bw/2+((sp.mag||0)?(sp.magLen||10)*k*0.55:0) },
+    { i:5, s:'grip',   x:xb+bl*(sp.foreX||0.48), y:cy+bw*1.7 },
     { i:6, s:'stock',  x:x0+8, y:cy+bw*0.1 }
   ];
   var col = ['#7fb99a','#8fb8d0','#d8b46a','#a99ad0','#d09191','#7fa8b8'];
@@ -15998,6 +17203,7 @@ function renderGunsmith(){
   var wid = widOf(menuState.weapon || 'm4');
   if(!WEAPONS[wid]) wid = 'm4';
   normMods(loadout[wid] || (loadout[wid] = {}));
+  if(!gsPv || gsPvWid !== wid) gsPvReset(wid);      /* 第79单：进页/切枪重置预览（未确认不落 loadout） */
   /* 左栏：只列仓库里有的枪（去重、非近战） */
   var gunIds = [], seenG = {};
   for(var si=0; si<STASH.items.length; si++){
@@ -16013,16 +17219,21 @@ function renderGunsmith(){
   if(gunIds.indexOf(wid)<0 && gunIds.length) wid = gunIds[0];
   if(gunIds.indexOf(wid)<0) gunIds.push(wid);
   menuState.weapon = wid;
-  var cur = getStats(wid), base = baseStats(wid);
+  if(gsPvWid !== wid) gsPvReset(wid);               /* 上面左栏可能换 wid，再校一次 */
+  /* 第79单：属性条按预览算 —— 临时把预览写进 loadout 取 getStats，取完立刻还原（同步单线程，无副作用） */
+  var base = baseStats(wid), cur, savedMods = JSON.parse(JSON.stringify(loadout[wid]));
+  loadout[wid] = JSON.parse(JSON.stringify(gsPv));
+  cur = getStats(wid);
+  loadout[wid] = savedMods;
   var glist = gunIds.map(function(id){
-    var w = WEAPONS[id], n = modsCount(loadout[id]||{});
+    var w = WEAPONS[id], pv = id === wid ? gsPv : normMods(loadout[id] || (loadout[id] = {}));
     return '<div class="bngun'+(id===wid?' on':'')+'" data-bw="'+id+'">' + w.name +
-      '<div class="m">配件 '+n+' 件 · 估价 ₡'+(ld3Cents(id)+modsCost(id))+'</div></div>';
+      '<div class="m">配件 '+modsCount(pv)+' 件 · 估价 ₡'+(ld3Cents(id)+gsModsCost(pv))+'</div></div>';
   }).join('');
-  /* 右栏：六槽，当前件 + 可选项（仓库已有标「已有」，否则 ₡ 可买） */
+  /* 右栏：六槽，当前件（预览）+ 可选项（仓库已有标「已有」，否则 ₡ 可买） */
   var inStoryLeft = inStory ? (STORY.gear ? ((storyCh(storyLoad().chapter).budget||storyBudget(storyLoad().chapter)) - storySpent(STORY.gear)) : 0) : 0;
   var slotsHtml = MOD_ORDER.map(function(slot, ix){
-    var nowId = loadout[wid][slot], now = attDef(slot, nowId), nowP = now.p || 0;
+    var nowId = gsPv[slot], now = attDef(slot, nowId), nowP = now.p || 0;
     var opts = ATT[slot].map(function(a){
       var owned = benchOwned(a.id), pay = !owned && a.p>0;
       var dis = inStory && pay && (a.p-nowP > inStoryLeft);
@@ -16034,7 +17245,7 @@ function renderGunsmith(){
     return '<div class="bnslot"><div class="t"><b>'+(ix+1)+'</b>'+MOD_CATS[slot]+'</div>' +
       '<div class="cur">当前：'+now.n+'</div><div class="bnopts">'+opts+'</div></div>';
   }).join('');
-  var op = OPTICS[loadout[wid].optic] || OPTICS.none;
+  var op = OPTICS[gsPv.optic] || OPTICS.none;
   var warn = op.nearPen>1 ? '<div class="bnwarn">'+op.hint+' · 近距晃动 ×1.8 · 小地图无敌人报点</div>' : '';
   /* 底部六条属性（当场变：▲绿 / ▼红） */
   var concealBase = 100, concealCur = 100 + (cur.stealth||0);
@@ -16045,19 +17256,26 @@ function renderGunsmith(){
     benchStatRow('射速', base.rpm, cur.rpm, function(v){return Math.round(v);}, false) +
     benchStatRow('机动', gsMob(base.wt), gsMob(cur.wt), function(v){return v+'%';}, false) +
     benchStatRow('隐蔽', concealBase, concealCur, function(v){return Math.round(v);}, false);
+  /* 第79单：底部两条确认路径 —— 【购买并装配】扣钱 / 【只装配】扣仓库货；未确认不生效 */
+  var price = gsBuyPrice(wid, gsPv), money = tradeMoney(), gaps = gsFitGaps(gsPv);
   box.innerHTML =
     '<div class="bnhd"><div><h1 style="font-size:18px">改 枪 台</h1>' +
-      '<div class="sub" style="margin:0">仓库里的枪 · 六槽装拆 · 瞄具不是越大越好</div></div>' +
+      '<div class="sub" style="margin:0">先选件 → 买（扣钱）或装（扣仓库）· 瞄具不是越大越好</div></div>' +
       '<div style="font-size:11px;color:#4f6b7e">开镜 '+cur.adsTime.toFixed(2)+'s · 重量 +'+(cur.wt-base.wt).toFixed(1)+'kg · ESC 返回</div></div>' +
     '<div class="bnbody"><div class="bnguns">'+glist+'</div>' +
       '<div class="bnmid"><canvas id="bnCv" width="640" height="260"></canvas>'+warn+
-        '<div class="gsprice"><span>枪价 ₡'+ld3Cents(wid)+'</span><span>配件 ₡'+modsCost(wid)+'</span>' +
-        '<span>总价 <b>₡'+(ld3Cents(wid)+modsCost(wid))+'</b></span>' +
-        '<span class="gsbudget">钱包 <b>₡'+tradeMoney()+'</b></span></div></div>' +
+        '<div class="gsprice"><span>枪价 ₡'+ld3Cents(wid)+'</span><span>配件 ₡'+gsModsCost(gsPv)+'</span>' +
+        '<span>总价 <b>₡'+(ld3Cents(wid)+gsModsCost(gsPv))+'</b></span>' +
+        '<span class="gsbudget">钱包 <b>₡'+money+'</b></span></div></div>' +
       '<div class="bnslots">'+slotsHtml+'</div></div>' +
     '<div class="bnstat">'+statsHtml+'</div>' +
-    '<button id="bnDone" style="margin-top:10px">完成</button>';
-  drawBenchGun(document.getElementById('bnCv'), wid);
+    '<div style="display:flex;gap:10px;margin-top:10px;align-items:center;flex-wrap:wrap">' +
+      '<button id="bnBuy"'+(price>money?' disabled':'')+'>购买并装配 · ₡'+price+'</button>' +
+      (price>money ? '<span style="color:#e06a4a;font-size:12px">钱不够 · 差 ₡'+(price-money)+'</span>' : '') +
+      '<button id="bnFit">只装配（用仓库货）</button>' +
+      '<span style="font-size:11px;color:#4f6b7e;margin-left:auto">配件没点确认不生效 · ESC 返回</span></div>' +
+    (gaps.length ? '<div style="color:#e0a46a;font-size:11px;margin-top:6px">仓库没有：'+gaps.join(' · ')+' —— 去交易买，回来点「只装配」</div>' : '');
+  drawBenchGun(document.getElementById('bnCv'), wid, gsPv);
   box.onclick = function(e){
     if(!tqPageIs('gs')) return;                    /* 第51单：改枪台不 active 时不响应 */
     var t = e.target;
@@ -16066,22 +17284,33 @@ function renderGunsmith(){
     var so = t.closest ? t.closest('[data-bs]') : null;
     if(so){
       if(so.classList.contains('dis')) return;
-      var slot = so.getAttribute('data-bs'), mid = so.getAttribute('data-ba');
-      var def = attDef(slot, loadout[wid][slot]);
-      if(!benchOwned(mid) && mid!=='none' && mid!=='bstd' && !inStory){
-        if(!benchBuy(mid)) return;
-      }
-      loadout[wid][slot] = mid;
+      gsPv[so.getAttribute('data-bs')] = so.getAttribute('data-ba');   /* 第79单：只改预览，确认才扣钱/扣货 */
       renderGunsmith(); return;
     }
-    if(t.id === 'bnDone') closeGunsmith();
+    if(t.id === 'bnBuy'){ gsBuyCommit(wid); return; }
+    if(t.id === 'bnFit'){ gsFitCommit(wid); return; }
   };
 }
 
 function endScreen(win){
   tqKillFeedClear();                            /* 第50单：结算页不留播报 */
-  /* 第35单：先结算背包 —— 撤离成功全部入库（放不下的逐条列在下面），阵亡全丢 */
-  if(!S.packSettled){ S.packSettled = true; packSettle(!!win); }
+  /* 第76单（秋 19:42）：duel（1v1 决斗）与 control（占点）是娱乐模式 —— 仓库只读，
+     无论输赢都不结算：不带出物资、不扣已装备枪/甲耐久（局内耐久每局入场即满，本就不落盘）、
+     不动钱。背包恢复开局快照 raidPack0（本局捡的东西一律不带出），收益计数清零。
+     只有剧情（story）撤离成功才写回仓库；掉线/对面退出走 startNetReconnect 直接回菜单，
+     不进本函数、什么都不结算，正好符合「不算失败也不给奖励」。 */
+  var entMode = net.role !== 'off' && (net.mode === 'duel' || net.mode === 'control');
+  if(entMode){
+    if(!S.packSettled){
+      S.packSettled = true;
+      try{ PACK.items = JSON.parse(S.raidPack0 || '[]'); }catch(e){ PACK.items = []; }
+      if(!(PACK.items instanceof Array)) PACK.items = [];
+      PACK_CAST = null; packSel = null; packCastBar();
+      LOOT.runGain = 0; lootBoxClose();
+      if(packOpen) closePack();
+      S.packRes = { ent: true, win: !!win, moved: 0, cells: 0, fail: [], lost: 0, lostCells: 0, gain: 0, gainLost: 0 };
+    }
+  } else if(!S.packSettled){ S.packSettled = true; packSettle(!!win); }
   if(STORY.play){ renderStoryDebrief(win); return; }   // §35-A：剧情局 → 结算档案页，不走通用结算
   if(net.role !== 'off' && net.mode === 'coop'){ renderCoopEnd(win); return; }   // 第25单：co-op 结算（击杀/波次/耗时）
   if(net.role === 'host' && net.conn && !net.endSent){ net.endSent = true; netSend({ t: 'end', win: !!win }); }
@@ -17034,7 +18263,13 @@ function netSendSnap(){
     dm: S.mode === 'dm' ? 1 : 0, gs: net.guestScore || 0, ks: net.killsVsGuest || 0, toWin: S.scoreToWin,
     hp: R ? Math.round(R.hp) : 100, gm: R ? R.mag : 0, gr: R ? R.reserve : 0,
     ohp: Math.round(P.hp),
-    h: R ? [Math.round(R.x), Math.round(R.y), +R.aim.toFixed(2), R.wid, R.alive ? 1 : 0, Math.round(R.hp)] : null,
+    /* 第76单（秋「联机对面压根位置不对」根因）：h[] 原来发的是 net.remote —— 主机侧那是
+       「客机替身」（由客人输入模拟出来的位置），客机把它当成对手画出来，等于对面永远
+       画在客人自己被模拟的位置上，真人房主在客机屏上根本不存在。
+       现在改为发主机本人 P 的权威坐标/朝向/武器/存活/血量：客机的 net.remote
+       （1v1=对手 / co-op=队友）从此以房主真实位置为准。hp/gm/gr 仍按客机替身口径，
+       供客机写回自己的 P.hp/P.mag，语义零改。 */
+    h: [Math.round(P.x), Math.round(P.y), +P.aim.toFixed(2), P.wid, P.alive ? 1 : 0, Math.round(P.hp)],
     e: es, b: bs, s: S.shake > 1 ? 1 : 0,
     /* 第23单 1v1 决斗：差量里带双方死亡数 / 剩余秒 / 双方弹匣 / 命中事件；ping 由快照回环测量 */
     du: net.duel ? 1 : 0, pd: net.pDeaths, rd: net.rDeaths, dl: Math.max(0, Math.round(net.deadline)),
@@ -17077,13 +18312,19 @@ function netGuestTick(dt){
       gx: Math.round(P.x), gy: Math.round(P.y)
     });
   }
-  // 位置插值（敌人 + 房主）
+  // 位置插值（敌人 + 房主）—— 第76单重写：
+  // 远端单位一律以主机权威坐标（快照 nx/ny）为准，客机只做固定 0.1 秒线性插值，
+  // 不做任何本地预测推进；距最近一次差量包超过 800ms 视为断流，冻结在最后收到的
+  // 权威坐标上（直接吸附 nx/ny 并停止更新，绝不朝旧目标继续外推）。
   var list = allies.concat(enemies), i;
+  var lostMs = net.rxTime ? (Date.now() - net.rxTime) : 1e9;
   for(i = 0; i < list.length; i++){
     var u = list[i];
     if(u === P || u.nx === undefined) continue;
-    u.x += (u.nx - u.x) * Math.min(1, dt * 14);
-    u.y += (u.ny - u.y) * Math.min(1, dt * 14);
+    if(lostMs > 800){ u.x = u.nx; u.y = u.ny; continue; }
+    var k = Math.min(1, dt / 0.1);   // 0.1 秒内线性走到最新权威坐标
+    u.x += (u.nx - u.x) * k;
+    u.y += (u.ny - u.y) * k;
   }
   for(i = 0; i < enemies.length; i++){
     if(!enemies[i].alive) enemies[i].deadT = (enemies[i].deadT || 0) + dt;
@@ -17092,6 +18333,7 @@ function netGuestTick(dt){
 
 function netApplySnap(s){
   net.lastSnap = s;   /* 第24单只读探针用：验证差量字段 */
+  net.rxTime = Date.now();   /* 第76单：每次收到差量包记录时间 —— netGuestTick 超 800ms 没更新就冻结 */
   S.kills = s.k; S.total = s.t2 || S.total;
   S.clock = s.c; S.weather = s.w;
   if(P){
@@ -17180,6 +18422,31 @@ function netApplySnap(s){
     net.cwRest = s.cr || 0; net.cwKills = s.ck || 0; net.cwElapsed = s.c || 0;
   }
 }
+
+/* ---------- 第76单：只读联机位置探针（秋「联机对面压根位置不对」验收用） ----------
+   __TQ.netDiag() → { remote:{x,y}, interpMs, lostMs, mode, mates:[{x,y,alive}] }
+   remote = 对手/队友单位（主机权威坐标经 0.1s 插值后的显示位置）；
+   interpMs = 插值窗（0.1 秒）；lostMs = 距最近一次差量包毫秒数（>800 即冻结，-1 = 还没收到过包）；
+   mates = 其余远端同步单位（AI 敌人 / bot），不含 remote 与本地 P。 */
+function tqNetDiag(){
+  var R = net.remote, out = [], list = allies.concat(enemies), i;
+  for(i = 0; i < list.length; i++){
+    var u = list[i];
+    if(!u || u === P || u === R || u.nx === undefined) continue;
+    out.push({ x: Math.round(u.x), y: Math.round(u.y), alive: !!u.alive });
+  }
+  return {
+    remote: R ? { x: Math.round(R.x || 0), y: Math.round(R.y || 0) } : null,
+    interpMs: 100,
+    lostMs: net.rxTime ? (Date.now() - net.rxTime) : -1,
+    mode: net.role === 'off' ? null : net.mode,
+    mates: out
+  };
+}
+(function tqNetDiagInstall(){
+  if(window.__TQ){ window.__TQ.netDiag = tqNetDiag; return; }
+  setTimeout(tqNetDiagInstall, 0);
+})();
 
 /* ---------- 语音：默认关闭，按住 T 说话 ---------- */
 function updateMicUI(){
@@ -18145,6 +19412,32 @@ window.__TQ = {
   },
   /* 第50单：名字探针 → { uid, name, isGuest } */
   name: function(){ return { uid: TQ_UID || '', name: TQ_NAME(), isGuest: tqIsGuest() }; },
+  /* 第77单：品质探针 → 仓库+背包+胸挂里各品质件数（局外先读档补齐再数；局内只数内存，不清现场） */
+  quality: function(){
+    if(typeof S === 'undefined' || S.phase !== 'play'){
+      try{ if(typeof stashLoad === 'function') stashLoad();
+           if(typeof packLoad === 'function') packLoad();
+           if(typeof rigLoad === 'function') rigLoad(); }catch(e){}
+    }
+    var c = qCountAll();
+    return { common:c.common, fine:c.fine, rare:c.rare, epic:c.epic,
+      legend:c.legend, myth:c.myth, total:c.total };
+  },
+  /* 第77单：自测钩子 → 造一件指定品质（0–5）的枪放进仓库；q=5 走神话红，便于验显示与限量 */
+  qTest: function(q){
+    if(typeof S !== 'undefined' && S.phase === 'play') return { ok:false, why:'raid' };
+    try{ if(typeof stashLoad === 'function') stashLoad(); }catch(e){}
+    var qv = Math.max(0, Math.min(5, q|0));
+    var guns = [], k, g;
+    for(k in TRADE_GOODS){
+      g = TRADE_GOODS[k];
+      if(g.gun && WEAPONS[g.gun] && WEAPONS[g.gun].cat !== 'melee') guns.push(k);
+    }
+    if(!guns.length) return { ok:false, why:'no guns' };
+    var id = guns[(Math.random() * guns.length) | 0];
+    var r = stashAddUnits(id, 1, 1, false, qv);
+    return r.ok ? { ok:true, id:id, q:qv, n:(TRADE_GOODS[id] || {}).name } : { ok:false, why:r.why };
+  },
   /* 第49单：云存档探针 → { user, repo, lastPackAt, lastError }；传 o.user/o.repo 仅供自测注入 */
   cloud: function(o){
     if(o && typeof o === 'object'){
@@ -18364,6 +19657,8 @@ window.__TQ = {
         if(!benchOwned(o.set[sl]) && !STORY.pending) benchBuy(o.set[sl]);
         loadout[wid][sl] = o.set[sl];
       }
+      loadoutSave();                                             /* 第79单：装配状态落盘 */
+      if(typeof gsPvReset === 'function') gsPvReset(wid);        /* 第79单：预览同步 */
     }
     if(o.open){ openGunsmith(); }
     var st = getStats(wid), mods = normMods(loadout[wid]||{}), op = OPTICS[mods.optic]||OPTICS.none;
@@ -18373,12 +19668,70 @@ window.__TQ = {
       scene: op.scene, miniHide: op.miniHide, nearPen: op.nearPen,
       money: tradeMoney(), stash: STASH.items.length, open: !!gunsmithOpen };
   },
+  gunsmith: function(){    /* 第79单 改枪台购买装配只读探针：{wid,price,mods,money,fitted} */
+    stashLoad();
+    var wid = widOf(menuState.weapon || 'm4');
+    if(!WEAPONS[wid]) wid = 'm4';
+    var md = normMods(loadout[wid] || (loadout[wid] = {})), arr = [], fit = [], price = 0, i, s;
+    for(i = 0; i < MOD_ORDER.length; i++){
+      s = MOD_ORDER[i];
+      arr.push(s + ':' + md[s]);
+      if(benchOwned(md[s])) fit.push(md[s]);
+      else price += attDef(s, md[s]).p || 0;
+    }
+    if(!benchOwnedGun(wid)) price += ld3Cents(wid);   /* 枪还没拥有 → 枪价计入购买总额 */
+    return { wid: wid, price: price, mods: arr, money: tradeMoney(), fitted: fit,
+      ownedGun: benchOwnedGun(wid), stash: STASH.items.length, open: !!gunsmithOpen };
+  },
+  gsTest: function(o){     /* 第79单 改枪台两路径 + 拖装自测入口：o.mode='fit'|'buy'|'drag' · o.set={slot:mid} · o.gun · o.mid */
+    o = o || {};
+    stashLoad();
+    var wid = widOf(o.gun || menuState.weapon || 'm4');
+    if(!WEAPONS[wid]) wid = 'm4';
+    normMods(loadout[wid] || (loadout[wid] = {}));
+    gsPvReset(wid);
+    if(o.set){ for(var s in o.set) gsPv[s] = o.set[s]; }
+    var before = tradeMoney(), r = { wid: wid, mode: o.mode || '' };
+    if(o.mode === 'buy') gsBuyCommit(wid);
+    else if(o.mode === 'fit') gsFitCommit(wid);
+    else if(o.mode === 'drag'){
+      var comp = null, gun = null, i;
+      for(i = 0; i < STASH.items.length; i++){
+        if(STASH.items[i].id === 'm:' + (o.mid || 'comp')) comp = STASH.items[i];
+        if(STASH.items[i].id === wid) gun = STASH.items[i];
+      }
+      if(comp && gun){
+        stashBeginDrag(comp, null, false);
+        stashDrag.tx = gun.x; stashDrag.ty = gun.y;
+        r.dragDropped = stashDrop();
+      } else r.dragDropped = false;
+    }
+    r.muzzleNow = loadout[wid].muzzle;
+    r.spent = before - tradeMoney();
+    var qty = function(id){ var n = 0, i; for(i = 0; i < STASH.items.length; i++) if(STASH.items[i].id === id) n += (STASH.items[i].qty || 1); return n; };
+    r.comp = qty('m:comp'); r.supp = qty('m:supp');
+    r.saved = null;
+    try{ var sv = JSON.parse(localStorage.getItem(tqKey('tq_loadouts')) || '{}'); r.saved = (sv[wid] || {}).muzzle || null; }catch(e){}
+    r.open = !!gunsmithOpen;
+    return r;
+  },
   benchAds: function(v){       /* 第39单自测：直接设 P.ads 并返回实时 FOV（绕过键位绑定） */
     if(!P) return null;
     P.ads = clamp(+v||0, 0, 1);
     return { ads:P.ads, fov:playerVision().fov, sway:benchSwayMul(), miniHide:benchMiniHide() };
   },
   benchOptics: function(){ return JSON.parse(JSON.stringify(OPTICS)); },
+  gunArt: function(){      /* 第79单 枪模差异化只读探针：七把点名枪参数 + 六槽件数 */
+    var ids = ['m4','hk416','ak','scar','aug','g36','qbz95'], o = {}, i;
+    for(i = 0; i < ids.length; i++){
+      var m = gunSpec({ wid: ids[i] });
+      o[ids[i]] = { bl: m.bl, bw: m.bw, tl: m.tl, tw: m.tw, stock: m.stock, st: m.stockSt || '',
+        mag: m.curveMag ? 'curve' : 'straight', magX: m.magX, bull: !!m.bullpup, len: +(m.bl + m.tl).toFixed(1) };
+    }
+    var cats = {};
+    for(i = 0; i < MOD_ORDER.length; i++) cats[MOD_ORDER[i]] = ATT[MOD_ORDER[i]].length;
+    return { art: o, cats: cats };
+  },
   inStoryProbe: function(){ return !!STORY.pending; },
   trade: function(o){     /* 第33单 交易探针：无参=当日快照（money/day/prices/stock/sell）；
                              o.day=预演另一天的行情（只读不落盘）；o.money=改钱包；o.reset=清行情；o.dur=改临时持有物耐久 */
@@ -18632,6 +19985,31 @@ window.__TQ = {
     }
     return out;
   },
+  /* 第78单：容器/地面物探针 → { boxes:[{kind,x,y,tier}], ground:n }（menu 下返回空表，不炸） */
+  lootBoxes: function(){
+    var boxes = [], i, c;
+    for(i = 0; i < LOOT.containers.length; i++){
+      c = LOOT.containers[i];
+      boxes.push({ kind: c.type, x: Math.round(c.x), y: Math.round(c.y), tier: lootBoxTierOf(c.type) });
+    }
+    return { boxes: boxes, ground: PACK_DROPS.length };
+  },
+  /* 第78单：六类物资实际分布 → { ammo, med, nade, mod, valuable, junk }（容器+地面+槽 现存物资全数） */
+  lootCats: function(){
+    var out = { ammo:0, med:0, nade:0, mod:0, valuable:0, junk:0 }, i, j;
+    var bump = function(it){
+      if(!it || it.cash) return;
+      var k = lootCatOfId(it.id);
+      if(k && out[k] != null) out[k]++;
+    };
+    for(i = 0; i < LOOT.containers.length; i++)
+      for(j = 0; j < LOOT.containers[i].loot.length; j++) bump(LOOT.containers[i].loot[j]);
+    for(i = 0; i < LOOT.tray.length; i++) bump(LOOT.tray[i]);
+    for(i = 0; i < PACK_DROPS.length; i++) bump(PACK_DROPS[i]);
+    return out;
+  },
+  /* 第78单：本局收益探针 → 捡到物资的估值累计（撤离结算入钱的那个数） */
+  lootValue: function(){ return LOOT.runGain || 0; },
   introState: function(){   /* §35-B 入场动画只读探针（自测用，不改变任何状态） */
     return { on: INTRO.on, phase: S.phase, t: Math.round(INTRO.t * 100) / 100,
       skip: INTRO.skipAt !== null, typeA: INTRO.typeA, typeM: INTRO.typeM,
